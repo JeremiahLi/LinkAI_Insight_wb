@@ -443,9 +443,29 @@ export default function piCaptureExtension(pi) {
   })
 
   pi.on('before_agent_start', function(event, ctx) {
+    // 尝试采集工具定义清单（每次请求都会携带，但 usage 不含其构成）：
+    // 记录 name + 序列化后字符数，供前端把「工具定义」从其他输入中拆出。defensive：pi API 不存在时跳过。
+    var toolsInfo = null
+    try {
+      var raw = null
+      if (typeof pi.getTools === 'function') raw = pi.getTools()
+      else if (ctx && Array.isArray(ctx.tools)) raw = ctx.tools
+      else if (pi && Array.isArray(pi.tools)) raw = pi.tools
+      if (Array.isArray(raw) && raw.length > 0) {
+        toolsInfo = raw.map(function(t) {
+          var str = typeof t === 'string' ? t : JSON.stringify(t)
+          var name = t && typeof t === 'object' ? (t.name || t.function && t.function.name || '?') : '?'
+          return { name: name, chars: str.length }
+        })
+        appendLogLine(PLUGIN_LOG_PATH, 'tools.captured count=' + toolsInfo.length + ' chars=' + toolsInfo.reduce(function(a, t) { return a + t.chars }, 0))
+      }
+    } catch (e) {
+      appendLogLine(PLUGIN_LOG_PATH, 'tools.capture.error ' + (e && e.message || e))
+    }
     writeEvent(event, ctx, 'system_prompt', '系统提示词', 'success', {
       systemPrompt: (event && event.systemPrompt) || '',
-      length: ((event && event.systemPrompt) || '').length
+      length: ((event && event.systemPrompt) || '').length,
+      details: toolsInfo ? { tools: toolsInfo } : undefined
     })
   })
 

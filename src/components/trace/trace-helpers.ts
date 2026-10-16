@@ -170,7 +170,10 @@ export interface SpanRow {
   key: string;
   label: string;
   kind: string;
+  depth: number; // 缩进层级：Tool 归属于 LLM 调用，缩进一级
   spans: TraceSpan[];
+  laneCount: number; // 泳道数：并行（时间重叠）的 Span 上下堆叠
+  laneOf: Record<string, number>; // spanId -> 泳道序号（0-based）
 }
 
 export interface SpanGroup {
@@ -192,10 +195,38 @@ function buildRows(spans: TraceSpan[]): SpanRow[] {
     if (existing) {
       existing.spans.push(s);
     } else {
-      const row: SpanRow = { key, label: rowLabelOf(s), kind: s.kind, spans: [s] };
+      const depth =
+        s.kind === "tool_call" || s.kind === "tool_execution" || s.kind === "command" ? 1 : 0;
+      const row: SpanRow = {
+        key,
+        label: rowLabelOf(s),
+        kind: s.kind,
+        depth,
+        spans: [s],
+        laneCount: 1,
+        laneOf: {},
+      };
       map.set(key, row);
       rows.push(row);
     }
+  }
+  // 泳道分配：同一行内时间重叠的 Span 上下堆叠（并行执行可视化）
+  for (const row of rows) {
+    const sorted = [...row.spans].sort((a, b) => a.relStart - b.relStart);
+    const laneEnds: number[] = []; // 每条泳道当前最后一个 Span 的结束时刻（秒）
+    for (const s of sorted) {
+      const end = s.relStart + s.timelineMs / 1000;
+      let lane = laneEnds.findIndex((e) => e <= s.relStart + 0.001);
+      if (lane === -1) {
+        lane = laneEnds.length;
+        laneEnds.push(end);
+      } else {
+        laneEnds[lane] = end;
+      }
+      row.laneOf[s.id] = lane;
+    }
+    row.laneCount = laneEnds.length;
+    row.spans = sorted;
   }
   return rows;
 }
@@ -209,7 +240,7 @@ export function buildGroups(spans: TraceSpan[]): SpanGroup[] {
     if (roundSpans.length > 0) {
       groups.push({
         id: `round-${idx}`,
-        title: `Round ${idx}`,
+        title: `Round ${idx + 1}`,
         isBranch: false,
         startSec: Math.min(...roundSpans.map((s) => s.relStart)),
         endSec: Math.max(...roundSpans.map((s) => s.relStart + s.timelineMs / 1000)),
@@ -329,4 +360,236 @@ export function compressIdleGaps(spans: TraceSpan[], gapSec: number = ROUND_GAP_
     ...s,
     relStart: Math.max(0, s.relStart - (offsets.get(s.roundIndex) ?? 0)),
   }));
+}
+
+// ==================== LLM 调用构成分解 ====================
+
+/**
+ * 把每次 LLM 调用消耗的 Token（total）拆解为构成项：
+ * - assistant：上一轮模型输出（含 tool_calls），作为本轮输入被重新消费
+ * - tool：两次调用之间的工具执行结果（按字符数 ≈/4 估算，DB 无工具结果 token 数）
+ * - user / system：Round 首次调用时的用户输入 / 系统提示（同上估算）
+ * - cacheRead：缓存读——本调用命中提示缓存的输入 Token（前缀与之前一致，无需重新计算）
+ * - cacheWrite：缓存写——本调用新写入提示缓存的输入 Token（通常是新拼入上下文的内容）
+ *   （缓存读/写为 API 上报的真实值；total = input + output + cacheRead + cacheWrite）
+ * - other：其他输入（残差，兜底）
+ * - output：本次模型输出（真实值）
+ */
+
+export interface CallPart {
+  key: string;
+  label: string;
+  desc?: string;
+  colorVar: string;
+  value: number;
+}
+
+export interface CallInfo {
+  id: string;
+  name: string;
+  model?: string;
+  time: number; // relStart 秒（压缩域）
+  duration: number; // 秒
+  order: number; // 全局序号（1-based）
+  roundIndex: number;
+  total: number;
+  parts: CallPart[];
+}
+
+const approxTokens = (text?: string | null): number => {
+  if (!text) return 0;
+  // CJK 感知估算：汉字 ≈0.7 token/字（现代分词器 1 token ≈ 1.4~1.7 个汉字），
+  // 其余字符 ≈4 字符/token。纯 /4 会对中文显著低估，残差被推入"其他"。
+  let cjk = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (
+      (cp >= 0x4e00 && cp <= 0x9fff) || // CJK 统一表意
+      (cp >= 0x3400 && cp <= 0x4dbf) || // 扩展 A
+      (cp >= 0x3000 && cp <= 0x303f) || // CJK 标点
+      (cp >= 0xff00 && cp <= 0xffef) // 全角字符
+    ) {
+      cjk++;
+    }
+  }
+  return Math.round(cjk * 0.7 + (text.length - cjk) / 4);
+};
+
+const TOOL_KINDS = new Set(["tool_call", "tool_execution", "command"]);
+
+/** 是否为工具类 Span（用于树/甘特缩进归属到所属 LLM 调用） */
+export function isToolKind(kind: string): boolean {
+  return TOOL_KINDS.has(kind);
+}
+
+export function buildCalls(spans: TraceSpan[]): CallInfo[] {
+  const calls = spans
+    .filter((s) => s.kind === "llm_thinking" && s.tokens)
+    .sort((a, b) => a.startTime - b.startTime);
+
+  const result: CallInfo[] = [];
+  let prev: TraceSpan | null = null;
+
+  for (const c of calls) {
+    const t = c.tokens!;
+    const output = t.output;
+    const cacheRead = t.cacheRead;
+    const cacheWrite = t.cacheWrite;
+    const isFirstOfRound = !prev || prev.roundIndex !== c.roundIndex;
+    const assistant = !isFirstOfRound ? prev?.tokens?.output ?? 0 : 0;
+
+    // 两次调用之间的工具结果
+    let toolEst = 0;
+    const lo = prev ? prev.startTime : -Infinity;
+    for (const s of spans) {
+      if (!TOOL_KINDS.has(s.kind) || s.roundIndex !== c.roundIndex) continue;
+      if (s.startTime > lo && s.startTime <= c.startTime) {
+        toolEst += approxTokens(s.output);
+      }
+    }
+
+    // Round 首次调用：用户输入 + 系统提示 + 工具定义
+    let userEst = 0;
+    let sysEst = 0;
+    let toolDefsEst = 0;
+    if (isFirstOfRound) {
+      for (const s of spans) {
+        if (s.roundIndex !== c.roundIndex) continue;
+        if (s.kind === "user") userEst += approxTokens(s.input);
+        else if (s.kind === "system_prompt") {
+          sysEst += approxTokens(s.input);
+          // 工具定义：采集端记录在 system_prompt span 的 details.tools（name + 字符数）
+          if (s.details) {
+            try {
+              const d: { tools?: Array<{ chars?: number }> } = JSON.parse(s.details);
+              const tools = d && Array.isArray(d.tools) ? d.tools : null;
+              if (tools) {
+                toolDefsEst = Math.round(
+                  tools.reduce((acc: number, t: { chars?: number }) => acc + (typeof t.chars === "number" ? t.chars : JSON.stringify(t).length), 0) / 4,
+                );
+              }
+            } catch {
+              /* details 非工具清单 JSON，忽略 */
+            }
+          }
+        }
+      }
+    }
+
+    // 估算溢出时按比例压缩，保证分解总和 ≈ total
+    const fixed = output + cacheRead + cacheWrite + assistant;
+    let est = toolEst + userEst + sysEst + toolDefsEst;
+    const over = fixed + est - t.total;
+    if (over > 0 && est > 0) {
+      const k = Math.max(t.total - fixed, 0) / est;
+      toolEst = Math.round(toolEst * k);
+      userEst = Math.round(userEst * k);
+      sysEst = Math.round(sysEst * k);
+      toolDefsEst = Math.round(toolDefsEst * k);
+      est = toolEst + userEst + sysEst + toolDefsEst;
+    }
+    const other = Math.max(0, t.total - fixed - est);
+
+    const parts: CallPart[] = [
+      {
+        key: "assistant",
+        label: "assistant（上轮模型输出）",
+        desc: "上一轮模型的输出（含 tool_calls），作为本轮输入被重新送入模型",
+        colorVar: "--call-assistant",
+        value: assistant,
+      },
+      {
+        key: "tool",
+        label: "tool（工具执行结果）",
+        desc: "两次调用之间各工具的执行结果（按字符数 ≈4字符/token 估算）",
+        colorVar: "--call-tool",
+        value: toolEst,
+      },
+      {
+        key: "user",
+        label: "用户输入",
+        desc: "本轮用户提问（按字符数估算）",
+        colorVar: "--call-user",
+        value: userEst,
+      },
+      {
+        key: "system",
+        label: "系统提示",
+        desc: "本轮注入的 System Prompt（估算）",
+        colorVar: "--call-sys",
+        value: sysEst,
+      },
+      {
+        key: "toolDefs",
+        label: "工具定义",
+        desc: "本次请求携带的工具/Schema 定义（按采集到的字符数估算；未采集到时并入其他输入）",
+        colorVar: "--call-tooldefs",
+        value: toolDefsEst,
+      },
+      {
+        key: "cacheRead",
+        label: "缓存读（命中）",
+        desc: "本调用命中提示缓存的输入 Token：与之前重复的前缀（系统提示/历史轮次/旧工具结果）直接复用，无需重新计算。真实值",
+        colorVar: "--call-cache",
+        value: cacheRead,
+      },
+      {
+        key: "cacheWrite",
+        label: "缓存写（新建）",
+        desc: "本调用新写入提示缓存的输入 Token：通常是新拼入上下文的内容，供后续调用命中。真实值",
+        colorVar: "--call-cachewrite",
+        value: cacheWrite,
+      },
+      {
+        key: "other",
+        label: "其他输入",
+        desc: "无法归类到上述成分的剩余输入：典型为工具定义/Schema（每次请求携带但无单独记录）、图片/附件内容，以及字符估算与真实分词的偏差（残差兜底）",
+        colorVar: "--call-other",
+        value: other,
+      },
+      {
+        key: "output",
+        label: "本次模型输出",
+        desc: "本次调用模型生成的输出（含 tool_calls）。真实值",
+        colorVar: "--call-output",
+        value: output,
+      },
+    ].filter((p) => p.value > 0);
+
+    result.push({
+      id: c.id,
+      name: c.name,
+      model: c.model,
+      time: c.relStart,
+      duration: c.timelineMs / 1000,
+      order: result.length + 1,
+      roundIndex: c.roundIndex,
+      total: t.total,
+      parts,
+    });
+    prev = c;
+  }
+  return result;
+}
+
+/** 累计视角：聚合前 n 次调用的各构成项（求和恰好等于 Σ total） */
+export function cumulativeParts(calls: CallInfo[], upToOrder: number): { parts: CallPart[]; total: number } {
+  const scoped = calls.filter((c) => c.order <= upToOrder);
+  const sum = (key: string) =>
+    scoped.reduce((acc, c) => acc + (c.parts.find((p) => p.key === key)?.value ?? 0), 0);
+  const defs: Array<{ key: string; label: string; desc?: string; colorVar: string }> = [
+    { key: "output", label: "模型输出（assistant 消息）", desc: "各次调用模型生成的输出之和（真实值）", colorVar: "--call-output" },
+    { key: "assistant", label: "assistant（作为输入重读）", desc: "上一轮输出作为下一轮输入被重新消费的部分", colorVar: "--call-assistant" },
+    { key: "tool", label: "tool（工具执行结果）", desc: "工具执行结果按字符数 ≈4字符/token 估算", colorVar: "--call-tool" },
+    { key: "user", label: "用户输入", desc: "各轮用户提问（估算）", colorVar: "--call-user" },
+    { key: "system", label: "系统提示", desc: "各轮注入的 System Prompt（估算）", colorVar: "--call-sys" },
+    { key: "toolDefs", label: "工具定义", desc: "请求携带的工具/Schema 定义（按采集字符数估算）", colorVar: "--call-tooldefs" },
+    { key: "cacheRead", label: "缓存读（命中）", desc: "各调用命中提示缓存的输入 Token 之和（真实值）", colorVar: "--call-cache" },
+    { key: "cacheWrite", label: "缓存写（新建）", desc: "各调用新写入提示缓存的输入 Token 之和（真实值）", colorVar: "--call-cachewrite" },
+    { key: "other", label: "其他输入", desc: "工具定义/Schema、图片/附件、估算偏差等无法归类的剩余输入（残差兜底）", colorVar: "--call-other" },
+  ];
+  const parts = defs
+    .map((d) => ({ ...d, value: sum(d.key) }))
+    .filter((p) => p.value > 0);
+  return { parts, total: scoped.reduce((acc, c) => acc + c.total, 0) };
 }

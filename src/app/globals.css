@@ -106,6 +106,17 @@
   --chart-line-fill: oklch(0.6 0.14 230 / 0.14);
   --chart-bar-in: oklch(0.6 0.14 230 / 0.8);
   --chart-bar-out: oklch(0.6 0.15 155 / 0.8);
+  --chart-new: oklch(0.66 0.17 50);
+  /* LLM 调用构成分解（高对比） */
+  --call-assistant: oklch(0.62 0.16 300);
+  --call-tool: oklch(0.6 0.15 155);
+  --call-user: oklch(0.65 0.1 220);
+  --call-sys: oklch(0.72 0.15 70);
+  --call-cache: oklch(0.6 0.14 230);
+  --call-cachewrite: oklch(0.68 0.16 350);
+  --call-tooldefs: oklch(0.55 0.18 260);
+  --call-other: oklch(0.55 0.02 260);
+  --call-output: oklch(0.68 0.16 50);
 }
 
 .dark {
@@ -160,6 +171,17 @@
   --chart-line-fill: rgba(88, 166, 255, 0.14);
   --chart-bar-in: rgba(88, 166, 255, 0.8);
   --chart-bar-out: rgba(63, 185, 80, 0.8);
+  --chart-new: #f0883e;
+  /* LLM 调用构成分解（高对比） */
+  --call-assistant: #a371f7;
+  --call-tool: #3fb950;
+  --call-user: #56d4dd;
+  --call-sys: #d29922;
+  --call-cache: #58a6ff;
+  --call-cachewrite: #f778ba;
+  --call-tooldefs: #1f6feb;
+  --call-other: #8b949e;
+  --call-output: #f0883e;
 }
 
 @layer base {

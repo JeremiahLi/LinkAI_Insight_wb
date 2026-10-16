@@ -8,13 +8,17 @@ import { SlidePanel } from "./slide-panel";
 import { TraceTimeline } from "./trace-timeline";
 import { TraceTranscript } from "./trace-transcript";
 import {
+  buildCalls,
   compressIdleGaps,
+  cumulativeParts,
   displayDurationMs,
   flattenSession,
   isFailed,
+  isToolKind,
   kindLabel,
   spanColor,
   totalSecondsOf,
+  type CallInfo,
   type TraceSpan,
 } from "./trace-helpers";
 import { formatTokens, formatDuration } from "@/lib/format";
@@ -38,6 +42,10 @@ interface Props {
 export function TraceViewerPanel({ session, open, onClose }: Props) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
+  // 选中的 Token 调用柱（view: "cum" = 累计构成 / "delta" = 本次新增构成）
+  const [selectedCall, setSelectedCall] = useState<{ id: string; view: "cum" | "delta" } | null>(
+    null,
+  );
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [view, setView] = useState<"timeline" | "transcript">("timeline");
   const [panelWidth, setPanelWidth] = useState(88);
@@ -50,6 +58,7 @@ export function TraceViewerPanel({ session, open, onClose }: Props) {
         .then((data) => {
           setDetail(data);
           setSelectedSpanId(null);
+          setSelectedCall(null);
           setView("timeline");
         })
         .catch(console.error);
@@ -97,6 +106,18 @@ export function TraceViewerPanel({ session, open, onClose }: Props) {
     () => spans.find((s) => s.id === selectedSpanId) ?? null,
     [spans, selectedSpanId],
   );
+  const calls = useMemo(() => buildCalls(spans), [spans]);
+  const selectedCallInfo = useMemo(
+    () => (selectedCall ? (calls.find((c) => c.id === selectedCall.id) ?? null) : null),
+    [calls, selectedCall],
+  );
+  // 跨区域同步标记：点击柱体 → 树/甘特高亮对应 LLM；点击树/甘特中的 LLM → 两图柱体高亮
+  const highlightCallId = useMemo(() => {
+    if (selectedCall) return selectedCall.id;
+    const sp = selectedSpan;
+    if (sp && sp.kind === "llm_thinking" && calls.some((c) => c.id === sp.id)) return sp.id;
+    return null;
+  }, [selectedCall, selectedSpan, calls]);
 
   const llmCount = useMemo(() => spans.filter((s) => s.kind === "llm_thinking").length, [spans]);
   const toolCount = useMemo(
@@ -212,7 +233,17 @@ export function TraceViewerPanel({ session, open, onClose }: Props) {
               spans={spans}
               totalSeconds={totalSeconds}
               selectedId={selectedSpanId}
-              onSelect={setSelectedSpanId}
+              onSelect={(id) => {
+                setSelectedSpanId(id);
+                // 右栏回到 Span 详情；若选中的是 LLM 调用，两图对应柱体仍保持高亮
+                setSelectedCall(null);
+              }}
+              onSelectCall={(id, v) => {
+                // 点击柱体：右栏显示构成明细，同时同步高亮左树/甘特中对应的 LLM 条
+                setSelectedCall({ id, view: v });
+                setSelectedSpanId(id);
+              }}
+              highlightCallId={highlightCallId}
             />
           ) : (
             <TraceTranscript
@@ -227,14 +258,23 @@ export function TraceViewerPanel({ session, open, onClose }: Props) {
         <aside className="w-96 shrink-0 overflow-y-auto scrollbar-thin border-l border-border bg-card">
           <div className="sticky top-0 z-10 border-b border-border bg-card p-3">
             <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Span 详情
+              {selectedCall ? "Token 构成明细" : "Span 详情"}
             </h2>
           </div>
           <div className="p-4 text-sm">
-            {selectedSpan ? (
+            {selectedCall && selectedCallInfo ? (
+              <CallBreakdownPanel
+                call={selectedCallInfo}
+                view={selectedCall.view}
+                calls={calls}
+                onBack={() => setSelectedCall(null)}
+              />
+            ) : selectedSpan ? (
               <SpanDetails span={selectedSpan} totalSeconds={totalSeconds} />
             ) : (
-              <p className="text-muted-foreground">点击左侧树或 Timeline 中的条查看详情</p>
+              <p className="text-muted-foreground">
+                点击左侧树或 Timeline 中的条查看详情；点击下方图表柱体可查看 Token 构成
+              </p>
             )}
           </div>
         </aside>
@@ -372,7 +412,7 @@ function RoundGroup({
         <span className="rounded-sm bg-primary/25 px-1.5 py-0.5 text-[9px] font-medium uppercase">
           Round
         </span>
-        <span>{round.index}</span>
+        <span>{round.index + 1}</span>
         {hasError ? (
           <span className="ml-auto text-[11px] text-destructive">✕ FAILED</span>
         ) : (
@@ -384,11 +424,12 @@ function RoundGroup({
 
       {!collapsed && (
         <>
+          {/* Tool 行缩进一级，归属到其所属的 LLM 思考 */}
           {roundSpans.map((span) => (
             <TreeItem
               key={span.id}
               span={span}
-              depth={0}
+              depth={isToolKind(span.kind) ? 1 : 0}
               selected={selectedId === span.id}
               onSelect={onSelect}
             />
@@ -503,7 +544,7 @@ function SpanDetails({ span, totalSeconds }: { span: TraceSpan; totalSeconds: nu
           <DetailCell label="模型" value={<span className="font-mono break-all">{span.model}</span>} />
         )}
         {span.roundIndex >= 0 && (
-          <DetailCell label="轮次" value={<span className="font-mono">Round {span.roundIndex}</span>} />
+          <DetailCell label="轮次" value={<span className="font-mono">Round {span.roundIndex + 1}</span>} />
         )}
       </div>
 
@@ -586,5 +627,114 @@ function Pre({ text }: { text: string }) {
     <pre className="mt-1 max-h-72 overflow-auto rounded bg-muted/40 p-2.5 text-xs leading-relaxed whitespace-pre-wrap break-all">
       {shown}
     </pre>
+  );
+}
+
+// ==================== Token 调用构成明细（点击图表柱体后展示） ====================
+
+function CallBreakdownPanel({
+  call,
+  view,
+  calls,
+  onBack,
+}: {
+  call: CallInfo;
+  view: "cum" | "delta";
+  calls: CallInfo[];
+  onBack: () => void;
+}) {
+  // delta 视图 = 该次调用的新增构成；cum 视图 = 截至该次调用的累计构成
+  const { parts, total } = useMemo(() => {
+    if (view === "delta") {
+      return { parts: call.parts, total: call.total };
+    }
+    const agg = cumulativeParts(calls, call.order);
+    return { parts: agg.parts, total: agg.total };
+  }, [view, call, calls]);
+
+  return (
+    <div>
+      {/* 头部：返回 + 调用标识 */}
+      <div className="mb-3 flex items-center gap-2">
+        <button
+          onClick={onBack}
+          className="rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+          title="返回 Span 详情"
+        >
+          ← 返回
+        </button>
+        <h3 className="text-[15px] font-medium">
+          {view === "delta" ? `第 ${call.order} 次 LLM 调用 · 本次新增` : `前 ${call.order} 次调用 · 累计构成`}
+        </h3>
+      </div>
+
+      {/* 调用基本信息 */}
+      <div className="mb-4 grid grid-cols-2 gap-3 text-xs">
+        <DetailCell
+          label="时间"
+          value={<span className="font-mono">{call.time.toFixed(2)}s</span>}
+        />
+        <DetailCell
+          label="耗时"
+          value={<span className="font-mono">{call.duration.toFixed(2)}s</span>}
+        />
+        <DetailCell label="轮次" value={<span className="font-mono">Round {call.roundIndex + 1}</span>} />
+        {call.model && (
+          <DetailCell label="模型" value={<span className="font-mono break-all">{call.model}</span>} />
+        )}
+      </div>
+
+      {/* 构成占比列表 */}
+      <div className="space-y-2.5">
+        {parts.length === 0 && (
+          <p className="text-xs text-muted-foreground">该调用无 Token 构成数据</p>
+        )}
+        {parts.map((p) => {
+          const pct = total > 0 ? (p.value / total) * 100 : 0;
+          return (
+            <div key={p.key} title={p.desc}>
+              <div className="flex items-center gap-2 text-xs">
+                <span
+                  className="h-2.5 w-2.5 shrink-0 rounded-sm"
+                  style={{ background: `var(${p.colorVar})` }}
+                />
+                <span className="flex-1 truncate">{p.label}</span>
+                <span className="font-mono font-medium">{formatTokens(p.value)}</span>
+                <span className="w-12 shrink-0 text-right font-mono text-muted-foreground">
+                  {pct.toFixed(1)}%
+                </span>
+              </div>
+              {/* 占比条 */}
+              <div className="mt-1 ml-[18px] h-1.5 overflow-hidden rounded-full bg-muted/60">
+                <div
+                  className="h-full rounded-full"
+                  style={{ width: `${Math.min(pct, 100)}%`, background: `var(${p.colorVar})` }}
+                />
+              </div>
+              {p.desc && (
+                <p className="ml-[18px] mt-1 text-[10px] leading-relaxed text-muted-foreground/70">
+                  {p.desc}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* 合计 + 说明 */}
+      <div className="mt-4 flex items-center justify-between border-t border-border pt-3 text-xs">
+        <span className="text-muted-foreground">
+          {view === "delta" ? "本次新增合计" : "累计合计"}
+        </span>
+        <span className="font-mono text-sm font-semibold">{formatTokens(total)}</span>
+      </div>
+      <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground/70">
+        说明：total = input + output + 缓存读 + 缓存写。缓存读 = 命中提示缓存的输入
+        （与之前重复的前缀直接复用、无需重新计算），缓存写 = 新写入缓存的输入；
+        两者为 API 上报的真实值，多轮会话中缓存读通常是最大成分。
+        assistant / tool 结果 / 用户输入 / 系统提示为按字符数估算（≈4 字符/token），
+        各估算子项超出合计时按比例缩减。
+      </p>
+    </div>
   );
 }

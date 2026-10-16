@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const https = require('node:https');
@@ -9,6 +10,18 @@ const LOG_DIR = path.join(__dirname, 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'upload.log');
 const LOCK_FILE = path.join(__dirname, '.uploader.lock');
 const CHECKPOINT_FILE = path.join(__dirname, 'uploader_checkpoint.json');
+
+// --scan-all 遍历的 spool 根目录，与捕获插件（pi_extension_capture.ts）保持一致
+const SPOOL_ROOT = process.env.PI_CAPTURE_SPOOL_DIR || path.join(os.homedir(), '.pi-capture');
+
+// checkpoint 中文件级 stat 条目的保留键（sessionId 为 uuid，不可能叫这个名字）
+const FILE_STATS_KEY = '__files__';
+
+// 派生算法版本：mergeToolCalls / buildSessionPayload / 时间锚点修正等派生逻辑变更时必须 +1。
+// 作用：读前预检（stat 没变就跳过读盘）会绕过签名重算，若没有版本号，
+// 派生算法升级后存量会话将被永远跳过、无法自动重传。版本号不匹配 → 强制全量重读重算。
+const DERIVE_VERSION = 2;
+
 // 检查点条目保留时长（天），超过则视为陈旧并剪枝；可用环境变量覆盖
 const CHECKPOINT_TTL_MS =
   (Number(process.env.PI_CAPTURE_CHECKPOINT_TTL_DAYS) > 0
@@ -177,18 +190,43 @@ function buildSessionPayload(records) {
     session.spans.push(span);
   }
   session.spans.sort(function(a, b) { return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(); });
+  // 时间锚点修正：采集记录的写入时刻是该 span 的「结束」时刻（llm_thinking/answer 在 message_end
+  // 写入；tool_call 经 mergeToolCalls 合并后取 tool_result 的写入时刻）。若直接以 createdAt 为起点
+  // 向右画 duration，每根条会整体右移自身时长，串行执行会被画成交叠（伪并行）。
+  // Pass A：已知真实时长的 span（LLM=agentReply、Tool=toolExecution），把锚点回移到真实开始时刻。
+  //   不计入 llmThinkDuration：它依赖跨事件全局变量，可能取到陈旧值导致条形异常膨胀。
+  // Pass B：其余 span（user/system_prompt 等，写入时刻即真实开始）按「下一条的修正后开始时刻」补全窗口，
+  //   避免其条形延伸到下一条的原始结束时刻、压住修正后的 LLM/Tool 条。
+  var KNOWN_DURATION_MAX_MS = 3600000;
   for (var i = 0; i < session.spans.length; i++) {
     var s = session.spans[i];
+    var knownDuration = null;
     if ((s.kind === 'llm_thinking' || s.kind === 'answer') && s.agentReplyDuration != null) {
-      s.duration = s.agentReplyDuration;
+      knownDuration = s.agentReplyDuration;
     } else if (s.kind === 'tool_call' && s.toolDuration != null) {
-      s.duration = s.toolDuration;
-    } else if (i < session.spans.length - 1) {
-      var next = session.spans[i + 1];
-      var diff = new Date(next.createdAt).getTime() - new Date(s.createdAt).getTime();
-      s.duration = diff > 0 && diff < 3600000 ? diff : 0;
+      knownDuration = s.toolDuration;
+    }
+    if (knownDuration != null) {
+      s.duration = knownDuration;
+      if (knownDuration > 0 && knownDuration < KNOWN_DURATION_MAX_MS) {
+        s.createdAt = new Date(new Date(s.createdAt).getTime() - knownDuration).toISOString();
+      }
+      s._needFallbackDuration = false;
     } else {
       s.duration = 0;
+      s._needFallbackDuration = true;
+    }
+  }
+  for (var j = 0; j < session.spans.length; j++) {
+    var t = session.spans[j];
+    if (!t._needFallbackDuration) continue;
+    delete t._needFallbackDuration;
+    if (j < session.spans.length - 1) {
+      var nextStart = new Date(session.spans[j + 1].createdAt).getTime();
+      var diff = nextStart - new Date(t.createdAt).getTime();
+      t.duration = diff > 0 && diff < KNOWN_DURATION_MAX_MS ? diff : 0;
+    } else {
+      t.duration = 0;
     }
   }
   var model = '';
@@ -221,13 +259,21 @@ function postJson(targetUrl, payload) {
   });
 }
 
-function findAllSessionRecords(jsonlFile) {
-  const fileName = path.basename(jsonlFile);
+// 从文件路径解析 sessionId 与项目目录，兼容两种命名：
+//   pi-<sessionId>-<yyyymmdd>-<hhmmss>.jsonl
+//   pi-<sessionId>.jsonl
+function parseSessionFile(filePath) {
+  const fileName = path.basename(filePath);
   const m = fileName.match(/^pi-(.+)-(\d{8})-(\d{6})\.jsonl$/);
   const sessionId = m ? m[1] : fileName.replace(/^pi-/, '').replace(/-\d{8}-\d{6}\.jsonl$/, '').replace(/\.jsonl$/, '');
-  const projectIdDir = path.dirname(path.dirname(jsonlFile));
-  const filePattern = new RegExp('^pi-' + sessionId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '-\\d{8}-\\d{6}\\.jsonl$');
-  const allRecords = [];
+  const projectIdDir = path.dirname(path.dirname(filePath));
+  return { sessionId, projectIdDir };
+}
+
+// 列出该 session 在项目目录下（跨日期目录）的所有 jsonl 文件。
+// 只做目录遍历 + 文件名匹配，不读文件内容——供读前预检使用。
+function listSessionFiles(projectIdDir, filePattern) {
+  const files = [];
   try {
     const dayDirs = fs.readdirSync(projectIdDir, { withFileTypes: true })
       .filter((d) => d.isDirectory()).map((d) => path.join(projectIdDir, d.name));
@@ -236,12 +282,21 @@ function findAllSessionRecords(jsonlFile) {
       try { entries = fs.readdirSync(dir, { withFileTypes: true }).filter((f) => f.isFile()); } catch { continue; }
       for (const entry of entries) {
         if (filePattern.test(entry.name)) {
-          const recs = readJsonl(path.join(dir, entry.name));
-          for (const r of recs) allRecords.push(r);
+          files.push(path.join(dir, entry.name));
         }
       }
     }
-  } catch (e) { log('findAllSessionRecords.error ' + (e.message || e)); }
+  } catch (e) { log('listSessionFiles.error ' + (e.message || e)); }
+  return files;
+}
+
+// 读入一个 session 的全部文件记录，做全序排序并分配全局轮次
+function readSessionRecords(sessionFiles) {
+  const allRecords = [];
+  for (const f of sessionFiles) {
+    const recs = readJsonl(f);
+    for (const r of recs) allRecords.push(r);
+  }
   const ordered = sortRecordsDeterministic(allRecords);
   var globalRound = -1;
   for (var i = 0; i < ordered.length; i++) {
@@ -249,7 +304,7 @@ function findAllSessionRecords(jsonlFile) {
     if (r.kind === 'user') globalRound++;
     if (globalRound >= 0) r.roundIndex = globalRound;
   }
-  return { sessionId, records: ordered };
+  return ordered;
 }
 
 function isPidAlive(pid) {
@@ -258,10 +313,16 @@ function isPidAlive(pid) {
   try { process.kill(n, 0); return true; } catch { return false; }
 }
 
-// 直接对内容做哈希：rawData 是全量记录的序列化，
-// 不含 endedAt=now 之类的运行时刻，因此内容不变则签名恒定、内容一变则签名必变
+// 直接对内容做哈希：rawData 是全量记录的序列化，spans 是由记录派生的 span 列表。
+// 两者均不含运行时刻（endedAt=now 除外），内容不变则签名恒定、内容一变则签名必变。
+// spans 纳入签名：派生算法（如时间锚点修正）变更时签名随之变化，触发存量会话自动重传。
 function computeSignature(session) {
-  return crypto.createHash('sha1').update(String(session.rawData || '')).digest('hex');
+  let spansJson = '';
+  try { spansJson = JSON.stringify(session.spans); } catch (e) { spansJson = ''; }
+  return crypto.createHash('sha1')
+    .update(String(session.rawData || ''))
+    .update(spansJson)
+    .digest('hex');
 }
 
 function loadCheckpoint() {
@@ -281,12 +342,31 @@ function saveCheckpoint(ckpt) {
   } catch {}
 }
 
-// 剪掉陈旧条目：超过 TTL 的，以及旧格式（值为字符串、没有 updatedAt）的条目
+// 剪掉陈旧条目：超过 TTL 的，以及旧格式（值为字符串、没有 updatedAt）的条目。
+// FILE_STATS_KEY 下是文件级 stat 条目，逐个按同样的 TTL 规则剪枝。
 function pruneCheckpoint(ckpt) {
   const now = Date.now();
   const pruned = {};
   let removed = 0;
   for (const id of Object.keys(ckpt)) {
+    if (id === FILE_STATS_KEY) {
+      const filesMap = ckpt[id];
+      const keptFiles = {};
+      if (filesMap && typeof filesMap === 'object') {
+        for (const fp of Object.keys(filesMap)) {
+          const entry = filesMap[fp];
+          const updatedAt =
+            entry && typeof entry === 'object' && entry.updatedAt ? Date.parse(entry.updatedAt) : NaN;
+          if (Number.isFinite(updatedAt) && now - updatedAt <= CHECKPOINT_TTL_MS) {
+            keptFiles[fp] = entry;
+          } else {
+            removed++;
+          }
+        }
+      }
+      if (Object.keys(keptFiles).length > 0) pruned[FILE_STATS_KEY] = keptFiles;
+      continue;
+    }
     const entry = ckpt[id];
     const updatedAt =
       entry && typeof entry === 'object' && entry.updatedAt ? Date.parse(entry.updatedAt) : NaN;
@@ -300,6 +380,48 @@ function pruneCheckpoint(ckpt) {
     log('checkpoint.prune removed=' + removed + ' kept=' + Object.keys(pruned).length);
   }
   return { ckpt: pruned, removed: removed };
+}
+
+function getFileStatsMap(ckpt) {
+  return ckpt[FILE_STATS_KEY] && typeof ckpt[FILE_STATS_KEY] === 'object' ? ckpt[FILE_STATS_KEY] : {};
+}
+
+// 读前预检：所有文件 stat（size + mtimeMs）与 checkpoint 一致 → 视为无变化。
+// 只做「快速说 no」（无变化 → 跳过读盘），正确性仍由内容签名兜底：
+//   - stat 说有变化但内容其实没变 → 全量读后签名命中，跳过上传，仅刷新 stat；
+//   - append 型 jsonl 的 size 不变 ⇒ 内容不变；mtime 额外兜住原地改写。
+function filesUnchanged(sessionFiles, filesMap) {
+  if (sessionFiles.length === 0) return false;
+  for (const f of sessionFiles) {
+    let st;
+    try { st = fs.statSync(f); } catch { return false; }
+    const e = filesMap[f];
+    if (!e || e.size !== st.size || e.mtimeMs !== st.mtimeMs) return false;
+  }
+  return true;
+}
+
+// 在读取前对文件做 stat 快照。必须在读取前取：若在上传后取，
+// 写入端在上传期间追加的行会被 stat 记为「已上传」，导致下次预检误跳过、丢数据。
+function snapshotFileStats(sessionFiles) {
+  const snap = {};
+  for (const f of sessionFiles) {
+    try {
+      const st = fs.statSync(f);
+      snap[f] = { size: st.size, mtimeMs: st.mtimeMs };
+    } catch {}
+  }
+  return snap;
+}
+
+// 把读前快照合并进 checkpoint 的文件级条目（updatedAt 取记录时刻）
+function recordFileStats(ckpt, snap) {
+  const now = new Date().toISOString();
+  const filesMap = getFileStatsMap(ckpt);
+  for (const f of Object.keys(snap)) {
+    filesMap[f] = { size: snap[f].size, mtimeMs: snap[f].mtimeMs, updatedAt: now };
+  }
+  ckpt[FILE_STATS_KEY] = filesMap;
 }
 
 function acquireLock() {
@@ -325,39 +447,61 @@ function releaseLock() {
   } catch {}
 }
 
-async function main() {
-  const jsonlFile = process.argv[2];
-  const backendUrl = process.argv[3] || 'http://localhost:3002';
+// 处理单个会话：预检 → 全量读 → 派生 → 签名比对 → 上传。
+// ckpt 由调用方传入并就地更新（scan-all 复用同一份，避免重复读写盘）。
+// 返回 'uploaded' | 'skipped' | 'empty' | 'failed'
+async function processSession(jsonlFile, backendUrl, ckpt) {
+  if (!fs.existsSync(jsonlFile)) { log('upload.skip fileNotFound file=' + jsonlFile); return 'skipped'; }
 
-  if (!jsonlFile) { log('upload.error missing jsonlFile argument'); process.exit(1); }
-  if (!fs.existsSync(jsonlFile)) { log('upload.skip fileNotFound file=' + jsonlFile); process.exit(0); }
+  const { sessionId, projectIdDir } = parseSessionFile(jsonlFile);
+  const escaped = sessionId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // 时间戳后缀可选：兼容 pi-<sessionId>.jsonl 旧命名（旧版正则强制要求后缀，导致该类文件永远匹配不到、不上传）
+  const filePattern = new RegExp('^pi-' + escaped + '(-\\d{8}-\\d{6})?\\.jsonl$');
 
-  if (!acquireLock()) { log('upload.skip lockNotAcquired'); process.exit(0); }
-  process.on('exit', releaseLock);
+  // 会话签名条目兼容三种形态：
+  //   { sig, v, updatedAt }（当前） / { sig, updatedAt }（旧版） / 纯字符串 sig（更旧）。
+  // 签名比对不受版本限制——重读重算后签名相同就说明 payload 字节级一致，无需重传；
+  // 派生算法升级时签名必然变化，逃生口由签名差异本身保证。
+  // v（DERIVE_VERSION）只用于读前预检：版本不匹配时禁止「不读盘就跳过」，
+  // 强制重读一次以重算签名，让算法升级能在下次触发时生效。
+  const prevEntry = ckpt[sessionId];
+  const prevSig =
+    typeof prevEntry === 'string' ? prevEntry
+    : prevEntry && typeof prevEntry === 'object' && typeof prevEntry.sig === 'string' ? prevEntry.sig
+    : null;
+  const prevVersionOk = prevEntry && typeof prevEntry === 'object' && prevEntry.v === DERIVE_VERSION;
 
-  log('upload.start file=' + jsonlFile + ' backend=' + backendUrl);
+  const sessionFiles = listSessionFiles(projectIdDir, filePattern);
 
-  const { sessionId, records: allRecords } = findAllSessionRecords(jsonlFile);
+  // 读前预检：stat 全部没变 + 已有同版本签名 → 不读盘直接跳过
+  if (prevVersionOk && prevSig && filesUnchanged(sessionFiles, getFileStatsMap(ckpt))) {
+    log('upload.skip statsUnchanged sessionId=' + sessionId + ' files=' + sessionFiles.length);
+    return 'skipped';
+  }
+
+  // 读前快照 stat（必须在读取前取，原因见函数注释）
+  const snap = snapshotFileStats(sessionFiles);
+
+  const allRecords = readSessionRecords(sessionFiles);
   log('upload.found sessionId=' + sessionId + ' totalRecords=' + allRecords.length);
 
   let records = mergeToolCalls(allRecords);
   log('upload.merged records=' + records.length);
 
-  if (records.length === 0) { log('upload.skip empty'); process.exit(0); }
+  if (records.length === 0) { log('upload.skip empty'); return 'empty'; }
 
   const session = buildSessionPayload(records);
   log('upload.payload sessionID=' + session.sessionID + ' spans=' + session.spans.length + ' piPid=' + session.piPid);
 
-  const pruned = pruneCheckpoint(loadCheckpoint());
-  const ckpt = pruned.ckpt;
-  if (pruned.removed > 0) saveCheckpoint(ckpt);
-
   const sig = computeSignature(session);
-  const prevEntry = ckpt[sessionId];
-  const prevSig = prevEntry && typeof prevEntry === 'object' ? prevEntry.sig : prevEntry;
   if (prevSig && prevSig === sig) {
+    // 内容没变（可能只是 mtime 抖动 / 首次迁移补 stat）：
+    // 会话条目升级到当前派生版本并记录 stat，下次即可走预检跳过、不再读盘
+    ckpt[sessionId] = { sig: sig, v: DERIVE_VERSION, updatedAt: new Date().toISOString() };
+    recordFileStats(ckpt, snap);
+    saveCheckpoint(ckpt);
     log('upload.skip checkpoint unchanged sessionId=' + sessionId + ' sig=' + sig);
-    process.exit(0);
+    return 'skipped';
   }
 
   const piAlive = isPidAlive(session.piPid);
@@ -366,12 +510,96 @@ async function main() {
   const res = await postJson(backendUrl, session);
   if (res.ok) {
     log('upload.success status=' + res.status + ' body=' + String(res.body).slice(0, 200));
-    ckpt[sessionId] = { sig: sig, updatedAt: new Date().toISOString() };
+    ckpt[sessionId] = { sig: sig, v: DERIVE_VERSION, updatedAt: new Date().toISOString() };
+    recordFileStats(ckpt, snap);
     saveCheckpoint(ckpt);
     log('upload.checkpointUpdated sessionId=' + sessionId + ' sig=' + sig);
+    return 'uploaded';
   } else {
     log('upload.failed status=' + res.status + ' body=' + String(res.body).slice(0, 500));
+    return 'failed';
   }
+}
+
+// --scan-all：遍历 spool 下所有 用户/项目/日期 目录中的会话文件，
+// 按项目目录 + sessionId 分组后逐会话处理（配合读前预检，稳态成本只有 readdir + stat）。
+// 文件名兼容带/不带时间戳后缀两种命名。
+async function scanAll(backendUrl) {
+  const files = [];
+  try {
+    const userDirs = fs.readdirSync(SPOOL_ROOT, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && d.name !== 'logs');
+    for (const u of userDirs) {
+      const uDir = path.join(SPOOL_ROOT, u.name);
+      let projectDirs;
+      try { projectDirs = fs.readdirSync(uDir, { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { continue; }
+      for (const p of projectDirs) {
+        const pDir = path.join(uDir, p.name);
+        let dateDirs;
+        try { dateDirs = fs.readdirSync(pDir, { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { continue; }
+        for (const d of dateDirs) {
+          const dDir = path.join(pDir, d.name);
+          let entries;
+          try { entries = fs.readdirSync(dDir, { withFileTypes: true }).filter((f) => f.isFile()); } catch { continue; }
+          for (const e of entries) {
+            if (/^pi-.+\.jsonl$/.test(e.name)) {
+              files.push(path.join(dDir, e.name));
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    log('scanall.scan.error ' + (e.message || e));
+  }
+
+  // 同一会话可能跨多个日期目录，按项目目录 + sessionId 分组，每个会话只处理一次
+  const groups = new Map();
+  for (const f of files) {
+    const { sessionId, projectIdDir } = parseSessionFile(f);
+    if (!sessionId) continue;
+    const key = projectIdDir + '\u0000' + sessionId;
+    if (!groups.has(key)) groups.set(key, f);
+  }
+  log('scanall.found files=' + files.length + ' sessions=' + groups.size);
+
+  const pruned = pruneCheckpoint(loadCheckpoint());
+  const ckpt = pruned.ckpt;
+  if (pruned.removed > 0) saveCheckpoint(ckpt);
+
+  let uploaded = 0, skipped = 0, failed = 0, empty = 0;
+  for (const repFile of groups.values()) {
+    const status = await processSession(repFile, backendUrl, ckpt);
+    if (status === 'uploaded') uploaded++;
+    else if (status === 'failed') failed++;
+    else if (status === 'empty') empty++;
+    else skipped++;
+  }
+  log('scanall.done uploaded=' + uploaded + ' skipped=' + skipped + ' empty=' + empty + ' failed=' + failed);
+}
+
+async function main() {
+  const arg1 = process.argv[2];
+  const backendUrl = process.argv[3] || 'http://localhost:3002';
+
+  if (!acquireLock()) { log('upload.skip lockNotAcquired'); process.exit(0); }
+  process.on('exit', releaseLock);
+
+  if (arg1 === '--scan-all') {
+    log('upload.scanAll backend=' + backendUrl);
+    await scanAll(backendUrl);
+    process.exit(0);
+  }
+
+  if (!arg1) { log('upload.error missing jsonlFile argument'); process.exit(1); }
+
+  log('upload.start file=' + arg1 + ' backend=' + backendUrl);
+
+  const pruned = pruneCheckpoint(loadCheckpoint());
+  const ckpt = pruned.ckpt;
+  if (pruned.removed > 0) saveCheckpoint(ckpt);
+
+  await processSession(arg1, backendUrl, ckpt);
 }
 
 main().catch((err) => {
