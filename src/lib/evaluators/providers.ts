@@ -86,9 +86,9 @@ export const LLM_PROVIDERS: LlmProvider[] = [
   {
     id: "deepseek",
     name: "DeepSeek",
-    baseUrl: "https://api.deepseek.com/v1",
-    defaultModel: "deepseek-chat",
-    suggestedModels: ["deepseek-chat", "deepseek-reasoner"],
+    baseUrl: "https://api.deepseek.com",
+    defaultModel: "deepseek-flash",
+    suggestedModels: ["deepseek-flash", "deepseek-v4-pro"],
     category: "china",
   },
   {
