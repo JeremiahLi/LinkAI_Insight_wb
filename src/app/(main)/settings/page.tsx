@@ -8,6 +8,8 @@ import {
   Eye,
   EyeOff,
   Bot,
+  Zap,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -34,11 +36,18 @@ interface Settings {
   configs: ModelConfig[];
 }
 
+interface TestResult {
+  loading: boolean;
+  ok?: boolean;
+  message: string;
+}
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<Settings>({ activeConfigId: null, configs: [] });
   const [loading, setLoading] = useState(true);
   const [showApiKey, setShowApiKey] = useState<Record<string, boolean>>({});
   const [editingConfig, setEditingConfig] = useState<ModelConfig | null>(null);
+  const [testState, setTestState] = useState<Record<string, TestResult>>({});
 
   useEffect(() => {
     fetch("/api/settings")
@@ -88,13 +97,16 @@ export default function SettingsPage() {
   const handleSaveConfig = () => {
     if (!editingConfig) return;
     const exists = settings.configs.find((c) => c.id === editingConfig.id);
-    let newConfigs: ModelConfig[];
-    if (exists) {
-      newConfigs = settings.configs.map((c) => (c.id === editingConfig.id ? editingConfig : c));
-    } else {
-      newConfigs = [...settings.configs, editingConfig];
-    }
-    const newSettings = { ...settings, configs: newConfigs };
+    const newConfigs: ModelConfig[] =
+      exists !== undefined
+        ? settings.configs.map((c) => (c.id === editingConfig.id ? editingConfig : c))
+        : [...settings.configs, editingConfig];
+    const newSettings = {
+      ...settings,
+      configs: newConfigs,
+      // 尚无使用中的配置时，自动激活当前保存的配置，避免运行时报 "No LLM config available"
+      activeConfigId: settings.activeConfigId ?? editingConfig.id,
+    };
     setSettings(newSettings);
     setEditingConfig(null);
     saveToDatabase(newSettings);
@@ -118,6 +130,47 @@ export default function SettingsPage() {
 
   const toggleShowApiKey = (id: string) => {
     setShowApiKey((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const runTest = async (config: ModelConfig) => {
+    const key = config.id;
+    setTestState((prev) => ({
+      ...prev,
+      [key]: { loading: true, message: "测试中..." },
+    }));
+    try {
+      const res = await fetch("/api/settings/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: config.id,
+          apiKey: config.apiKey,
+          baseUrl: config.baseUrl,
+          model: config.model,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setTestState((prev) => ({
+          ...prev,
+          [key]: {
+            loading: false,
+            ok: true,
+            message: `连通成功 · ${data.latencyMs}ms${data.totalTokens ? ` · ${data.totalTokens} tokens` : ""}${data.reply ? ` · 回复：${data.reply}` : ""}`,
+          },
+        }));
+      } else {
+        setTestState((prev) => ({
+          ...prev,
+          [key]: { loading: false, ok: false, message: `失败：${data.error}` },
+        }));
+      }
+    } catch {
+      setTestState((prev) => ({
+        ...prev,
+        [key]: { loading: false, ok: false, message: "失败：网络请求异常" },
+      }));
+    }
   };
 
   if (loading) {
@@ -155,45 +208,69 @@ export default function SettingsPage() {
           {settings.configs.map((config) => (
             <div
               key={config.id}
-              className={`flex items-center justify-between rounded-md p-3 ring-1 ${
+              className={`rounded-md p-3 ring-1 ${
                 settings.activeConfigId === config.id
                   ? "bg-primary/5 ring-primary/40"
                   : "ring-foreground/10"
               }`}
             >
-              <div className="flex items-center gap-3">
-                <Bot className="h-5 w-5 text-muted-foreground" />
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{config.name}</span>
-                    <Badge variant="secondary" className="text-xs">
-                      {LLM_PROVIDERS.find((p) => p.id === config.provider)?.name || config.provider}
-                    </Badge>
-                    {settings.activeConfigId === config.id && (
-                      <Badge variant="default" className="text-xs">
-                        <Check className="h-3 w-3 mr-1" />
-                        使用中
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Bot className="h-5 w-5 text-muted-foreground" />
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{config.name}</span>
+                      <Badge variant="secondary" className="text-xs">
+                        {LLM_PROVIDERS.find((p) => p.id === config.provider)?.name || config.provider}
                       </Badge>
-                    )}
+                      {settings.activeConfigId === config.id && (
+                        <Badge variant="default" className="text-xs">
+                          <Check className="h-3 w-3 mr-1" />
+                          使用中
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {config.model} · {config.baseUrl || "默认地址"}
+                    </p>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {config.model} · {config.baseUrl || "默认地址"}
-                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={testState[config.id]?.loading}
+                    onClick={() => runTest(config)}
+                  >
+                    {testState[config.id]?.loading ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Zap className="h-3.5 w-3.5" />
+                    )}
+                    测试
+                  </Button>
+                  {settings.activeConfigId !== config.id && (
+                    <Button variant="ghost" size="sm" onClick={() => handleSetActive(config.id)}>
+                      设为默认
+                    </Button>
+                  )}
+                  <Button variant="ghost" size="sm" onClick={() => setEditingConfig(config)}>
+                    编辑
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => handleDeleteConfig(config.id)}>
+                    <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                  </Button>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                {settings.activeConfigId !== config.id && (
-                  <Button variant="ghost" size="sm" onClick={() => handleSetActive(config.id)}>
-                    设为默认
-                  </Button>
-                )}
-                <Button variant="ghost" size="sm" onClick={() => setEditingConfig(config)}>
-                  编辑
-                </Button>
-                <Button variant="ghost" size="sm" onClick={() => handleDeleteConfig(config.id)}>
-                  <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                </Button>
-              </div>
+              {testState[config.id] && !testState[config.id].loading && (
+                <p
+                  className={`mt-2 text-xs break-all ${
+                    testState[config.id].ok ? "text-green-600" : "text-destructive"
+                  }`}
+                >
+                  {testState[config.id].message}
+                </p>
+              )}
             </div>
           ))}
         </CardContent>
@@ -293,14 +370,37 @@ export default function SettingsPage() {
                 </div>
               )}
             </div>
-            <div className="flex gap-2 pt-2">
-              <Button onClick={handleSaveConfig}>
-                <Check className="h-4 w-4 mr-1.5" />
-                确认
-              </Button>
-              <Button variant="ghost" onClick={() => setEditingConfig(null)}>
-                取消
-              </Button>
+            <div className="pt-2 space-y-2">
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  disabled={testState[editingConfig.id]?.loading}
+                  onClick={() => runTest(editingConfig)}
+                >
+                  {testState[editingConfig.id]?.loading ? (
+                    <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                  ) : (
+                    <Zap className="h-4 w-4 mr-1.5" />
+                  )}
+                  测试连接
+                </Button>
+                <Button onClick={handleSaveConfig}>
+                  <Check className="h-4 w-4 mr-1.5" />
+                  确认
+                </Button>
+                <Button variant="ghost" onClick={() => setEditingConfig(null)}>
+                  取消
+                </Button>
+              </div>
+              {testState[editingConfig.id] && !testState[editingConfig.id].loading && (
+                <p
+                  className={`text-xs break-all ${
+                    testState[editingConfig.id].ok ? "text-green-600" : "text-destructive"
+                  }`}
+                >
+                  {testState[editingConfig.id].message}
+                </p>
+              )}
             </div>
           </CardContent>
         </Card>
