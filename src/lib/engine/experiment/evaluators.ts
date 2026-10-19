@@ -40,9 +40,14 @@ const EVALUATORS: Evaluator[] = [
     "correctPoints": ["正确点1", "正确点2"],
     "incorrectPoints": ["错误点1"],
     "missingPoints": ["遗漏点1"],
-    "noReference": <true/false>
+    "noReference": <true/false>,
+    "outputSummary": "<对实际输出的客观摘要，100-200字，不得添加原文没有的信息>",
+    "reasoning": "<评分推理：为什么给出这个分数，关键判断依据逐条说明>",
+    "issues": [{"quote": "<从实际输出逐字摘录的问题片段，必须是原文精确子串>", "problem": "<该片段存在什么问题>", "suggestion": "<修改建议>"}]
   }
-}`,
+}
+
+要求：outputSummary 与 reasoning 必填；issues[].quote 必须逐字摘自实际输出原文（精确子串），没有明显问题时 issues 为空数组。`,
     buildUserPrompt: (ctx) => `参考答案：
 ${ctx.referenceOutput || "（未提供参考答案）"}
 
@@ -60,7 +65,12 @@ ${ctx.input || "（未知）"}
         confidence: Math.min(1, Math.max(0, res.confidence ?? 0.8)),
         verdict: res.verdict || "warn",
         summary: res.summary || "评估完成",
-        evidence: res.evidence || {},
+        evidence: {
+          outputSummary: "",
+          reasoning: "",
+          issues: [],
+          ...(res.evidence ?? {}),
+        },
       };
     },
   },
@@ -89,9 +99,14 @@ ${ctx.input || "（未知）"}
     "relevance": <0-100>,
     "completeness": <0-100>,
     "coherence": <0-100>,
-    "analysis": "<详细分析>"
+    "analysis": "<详细分析>",
+    "outputSummary": "<对实际输出的客观摘要，100-200字，不得添加原文没有的信息>",
+    "reasoning": "<评分推理：为什么给出这个分数，关键判断依据逐条说明>",
+    "issues": [{"quote": "<从实际输出逐字摘录的问题片段，必须是原文精确子串>", "problem": "<该片段存在什么问题>", "suggestion": "<修改建议>"}]
   }
-}`,
+}
+
+要求：outputSummary 与 reasoning 必填；issues[].quote 必须逐字摘自实际输出原文（精确子串），没有明显问题时 issues 为空数组。`,
     buildUserPrompt: (ctx) => `用户问题：
 ${ctx.input}
 
@@ -106,7 +121,12 @@ ${ctx.actualOutput}
         confidence: Math.min(1, Math.max(0, res.confidence ?? 0.8)),
         verdict: res.verdict || "warn",
         summary: res.summary || "评估完成",
-        evidence: res.evidence || {},
+        evidence: {
+          outputSummary: "",
+          reasoning: "",
+          issues: [],
+          ...(res.evidence ?? {}),
+        },
       };
     },
   },
@@ -137,9 +157,14 @@ ${ctx.actualOutput}
       {"text": "<主张>", "status": "supported|contradicted|not_covered", "evidence": "<支撑证据>"}
     ],
     "totalClaims": <总数>,
-    "supportedClaims": <支持数>
+    "supportedClaims": <支持数>,
+    "outputSummary": "<对实际输出的客观摘要，100-200字，不得添加原文没有的信息>",
+    "reasoning": "<评分推理：为什么给出这个分数，关键判断依据逐条说明>",
+    "issues": [{"quote": "<从实际输出逐字摘录的问题片段，必须是原文精确子串>", "problem": "<该片段存在什么问题>", "suggestion": "<修改建议>"}]
   }
-}`,
+}
+
+要求：outputSummary 与 reasoning 必填；issues[].quote 必须逐字摘自实际输出原文（精确子串），没有明显问题时 issues 为空数组。`,
     buildUserPrompt: (ctx) => `执行轨迹（工具调用记录）：
 ${ctx.trace.map((t, i) => `[${i + 1}] ${t.name}\n输入: ${t.input}\n输出: ${t.output}${t.error ? "\n错误: " + t.error : ""}`).join("\n\n") || "（无工具调用轨迹）"}
 
@@ -154,7 +179,12 @@ ${ctx.actualOutput}
         confidence: Math.min(1, Math.max(0, res.confidence ?? 0.8)),
         verdict: res.verdict || "warn",
         summary: res.summary || "评估完成",
-        evidence: res.evidence || {},
+        evidence: {
+          outputSummary: "",
+          reasoning: "",
+          issues: [],
+          ...(res.evidence ?? {}),
+        },
       };
     },
   },
@@ -185,9 +215,14 @@ ${ctx.actualOutput}
       {"text": "<约束>", "status": "met|not_met|not_applicable"}
     ],
     "metCount": <满足数>,
-    "applicableCount": <适用数>
+    "applicableCount": <适用数>,
+    "outputSummary": "<对实际输出的客观摘要，100-200字，不得添加原文没有的信息>",
+    "reasoning": "<评分推理：为什么给出这个分数，关键判断依据逐条说明>",
+    "issues": [{"quote": "<从实际输出逐字摘录的问题片段，必须是原文精确子串>", "problem": "<该片段存在什么问题>", "suggestion": "<修改建议>"}]
   }
-}`,
+}
+
+要求：outputSummary 与 reasoning 必填；issues[].quote 必须逐字摘自实际输出原文（精确子串），没有明显问题时 issues 为空数组。`,
     buildUserPrompt: (ctx) => `用户问题/指令：
 ${ctx.input}
 
@@ -202,7 +237,12 @@ ${ctx.actualOutput}
         confidence: Math.min(1, Math.max(0, res.confidence ?? 0.8)),
         verdict: res.verdict || "warn",
         summary: res.summary || "评估完成",
-        evidence: res.evidence || {},
+        evidence: {
+          outputSummary: "",
+          reasoning: "",
+          issues: [],
+          ...(res.evidence ?? {}),
+        },
       };
     },
   },
@@ -233,9 +273,21 @@ ${ctx.actualOutput}
     "completeness": <0-100>,
     "toolChoice": <0-100>,
     "redundancy": <0-100>,
-    "analysis": "<详细分析>"
+    "analysis": "<详细分析>",
+    "exploredTargets": [{"target": "<探索的目录/文件/资源>", "action": "读取|列出|搜索", "purpose": "<目的>"}],
+    "duplicateCalls": [{"tool": "<工具名>", "args": "<参数摘要>", "count": <重复次数>, "note": "<说明>"}],
+    "invalidCalls": [{"tool": "<工具名>", "args": "<参数摘要>", "issue": "<失败/无效原因>"}],
+    "knowledgeOnlyClaims": [{"claim": "<依赖模型自带知识而非轨迹实证的主张>", "reason": "<为什么判定无轨迹支撑>"}],
+    "outputSummary": "<对实际输出的客观摘要，100-200字，不得添加原文没有的信息>",
+    "reasoning": "<评分推理：为什么给出这个分数，关键判断依据逐条说明>",
+    "issues": [{"quote": "<从实际输出逐字摘录的问题片段，必须是原文精确子串>", "problem": "<该片段存在什么问题>", "suggestion": "<修改建议>"}]
   }
-}`,
+}
+
+要求：
+- exploredTargets / duplicateCalls / invalidCalls / knowledgeOnlyClaims 必须从执行轨迹中逐条提取，不得凭空编造；某类为空时输出空数组。
+- knowledgeOnlyClaims 用于标注"最终输出中依赖模型自带知识、在轨迹中找不到依据"的主张，并说明判定原因。
+- outputSummary 与 reasoning 必填；issues[].quote 必须逐字摘自最终输出原文（精确子串），没有明显问题时 issues 为空数组。`,
     buildUserPrompt: (ctx) => `执行轨迹（按时间顺序）：
 ${ctx.trace.map((t, i) => `[${i + 1}] 工具: ${t.name}\n输入: ${t.input}\n输出: ${t.output}${t.error ? "\n错误: " + t.error : ""}`).join("\n\n") || "（无执行轨迹）"}
 
@@ -250,7 +302,16 @@ ${ctx.actualOutput}
         confidence: Math.min(1, Math.max(0, res.confidence ?? 0.8)),
         verdict: res.verdict || "warn",
         summary: res.summary || "评估完成",
-        evidence: res.evidence || {},
+        evidence: {
+          outputSummary: "",
+          reasoning: "",
+          issues: [],
+          exploredTargets: [],
+          duplicateCalls: [],
+          invalidCalls: [],
+          knowledgeOnlyClaims: [],
+          ...(res.evidence ?? {}),
+        },
       };
     },
   },
@@ -291,9 +352,14 @@ ${ctx.actualOutput}
     ],
     "coveredCount": <覆盖数>,
     "totalCount": <总数>,
-    "noReference": <true/false>
+    "noReference": <true/false>,
+    "outputSummary": "<对实际输出的客观摘要，100-200字，不得添加原文没有的信息>",
+    "reasoning": "<评分推理：为什么给出这个分数，关键判断依据逐条说明>",
+    "issues": [{"quote": "<从实际输出逐字摘录的问题片段，必须是原文精确子串>", "problem": "<该片段存在什么问题>", "suggestion": "<修改建议>"}]
   }
-}`,
+}
+
+要求：outputSummary 与 reasoning 必填；issues[].quote 必须逐字摘自实际输出原文（精确子串），没有明显问题时 issues 为空数组。`,
     buildUserPrompt: (ctx) => `参考答案（关键观点来源）：
 ${ctx.referenceOutput || "（未提供参考答案，请根据用户问题推断关键完成点）"}
 
@@ -311,7 +377,12 @@ ${ctx.actualOutput}
         confidence: Math.min(1, Math.max(0, res.confidence ?? 0.8)),
         verdict: res.verdict || "warn",
         summary: res.summary || "评估完成",
-        evidence: res.evidence || {},
+        evidence: {
+          outputSummary: "",
+          reasoning: "",
+          issues: [],
+          ...(res.evidence ?? {}),
+        },
       };
     },
   },

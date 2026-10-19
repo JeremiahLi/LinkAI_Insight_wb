@@ -17,7 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shell/page-header";
 import { useEvaluators } from "@/hooks/use-evaluators";
 import { VerdictBadge } from "@/components/experiments/verdict-badge";
-import { EvidenceViewer } from "@/components/experiments/evidence-viewer";
+import { EvalResultDetail } from "@/components/experiments/eval-result-detail";
 
 
 interface CaseDetail {
@@ -350,19 +350,18 @@ export default function CaseDetailPage() {
                   </div>
                 </div>
 
-                {result.summary && (
-                  <p className="mb-2 text-[13px] leading-relaxed text-muted-foreground">{result.summary}</p>
-                )}
-
                 {result.errorMessage && (
                   <p className="mb-2 text-[13px] text-destructive">{result.errorMessage}</p>
                 )}
 
-                {result.status === "done" && result.evidenceJson && (
-                  <div className="mt-2 rounded-md bg-muted/30 p-3">
-                    <p className="mb-2 text-[11px] font-medium text-muted-foreground">评分依据</p>
-                    <EvidenceViewer evidenceJson={result.evidenceJson} />
-                  </div>
+                {result.status === "done" && (
+                  <EvalResultDetail
+                    evaluatorId={result.evaluatorId}
+                    summary={result.summary}
+                    evidenceJson={result.evidenceJson}
+                    actualOutput={caseData.actualOutput}
+                    sessionId={caseData.sessionId}
+                  />
                 )}
 
                 {result.status === "done" && (
