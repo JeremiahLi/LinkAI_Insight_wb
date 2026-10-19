@@ -48,3 +48,4 @@ Python/_cache/
 *.tsbuildinfo
 next-env.d.ts
 .tmp-shots/
+scripts/offline-server-pkg-win64/
