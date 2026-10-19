@@ -4,6 +4,27 @@ import { aggregateScores } from "@/lib/engine/experiment/detail-agg";
 
 const prisma = new PrismaClient();
 
+// 与 judge-assembly.assembleContext 相同的取数规则：优先取 Session 中第一条非空 answer span。
+// 返回 hasRealOutput=false 表示 Session 里没有真实回答（LLM 调用失败 / 无录制），
+// 此时只能回退到创建实验时的快照，前端应标注"样例"。
+async function resolveActualOutput(
+  sessionId: string | null,
+  snapshot: string
+): Promise<{ actualOutput: string; hasRealOutput: boolean }> {
+  if (!sessionId) {
+    return { actualOutput: snapshot, hasRealOutput: false };
+  }
+  const answerSpans = await prisma.span.findMany({
+    where: { sessionId, kind: "answer" },
+    orderBy: [{ roundIndex: "asc" }, { turnId: "asc" }],
+  });
+  const live = answerSpans.find((s) => s.output && s.output.trim())?.output;
+  if (live) {
+    return { actualOutput: live, hasRealOutput: true };
+  }
+  return { actualOutput: snapshot, hasRealOutput: false };
+}
+
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -52,23 +73,32 @@ export async function GET(
     watchMode: experiment.watchMode,
     overallAverage: aggregation.overallAverage,
     evaluatorScores: aggregation.evaluatorScores,
-    cases: experiment.cases.map((c) => ({
-      id: c.id,
-      sessionId: c.sessionId,
-      input: c.input,
-      actualOutput: c.actualOutput,
-      referenceOutput: c.referenceOutput,
-      results: c.results.map((r) => ({
-        id: r.id,
-        evaluatorId: r.evaluatorId,
-        status: r.status,
-        verdict: r.verdict,
-        summary: r.summary,
-        score: r.score,
-        humanScore: r.humanScore,
-        errorMessage: r.errorMessage,
-      })),
-    })),
+    cases: await Promise.all(
+      experiment.cases.map(async (c) => {
+        const { actualOutput, hasRealOutput } = await resolveActualOutput(
+          c.sessionId,
+          c.actualOutput
+        );
+        return {
+          id: c.id,
+          sessionId: c.sessionId,
+          input: c.input,
+          actualOutput,
+          hasRealOutput,
+          referenceOutput: c.referenceOutput,
+          results: c.results.map((r) => ({
+            id: r.id,
+            evaluatorId: r.evaluatorId,
+            status: r.status,
+            verdict: r.verdict,
+            summary: r.summary,
+            score: r.score,
+            humanScore: r.humanScore,
+            errorMessage: r.errorMessage,
+          })),
+        };
+      })
+    ),
     comments: experiment.comments,
     createdAt: experiment.createdAt,
     updatedAt: experiment.updatedAt,

@@ -22,6 +22,7 @@ interface CaseDetail {
   sessionId: string | null;
   input: string;
   actualOutput: string;
+  hasRealOutput: boolean;
   referenceOutput: string | null;
   results: {
     id: string;
@@ -75,6 +76,7 @@ export default function CaseDetailPage() {
             ...found,
             input: found.input || "",
             actualOutput: found.actualOutput || "",
+            hasRealOutput: found.hasRealOutput ?? false,
             referenceOutput: found.referenceOutput || null,
           });
         }
@@ -155,9 +157,21 @@ export default function CaseDetailPage() {
         </Card>
         <Card>
           <CardHeader className="border-b border-border/60 pb-2.5">
-            <CardTitle>实际输出</CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle>实际输出</CardTitle>
+              {!caseData.hasRealOutput && (
+                <Badge variant="outline" className="text-warning border-warning/40 shrink-0">
+                  样例 · 无真实运行输出
+                </Badge>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="pt-3">
+            {!caseData.hasRealOutput && (
+              <p className="mb-2 text-xs text-warning">
+                该 Case 没有来自 Session 录制的真实回答（LLM 调用失败或无输出记录），以下内容仅供参考。
+              </p>
+            )}
             <pre className="max-h-[200px] overflow-y-auto whitespace-pre-wrap font-mono text-xs leading-relaxed text-muted-foreground scrollbar-thin">
               {caseData.actualOutput || "（暂无输出）"}
             </pre>
