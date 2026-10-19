@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo, useEffect, useCallback } from "react";
-import { RefreshCw, Trash2, Search } from "lucide-react";
+import { RefreshCw, Trash2, Search, FlaskConical } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/select";
 import { StatusBadge } from "@/components/trace/shared";
 import { TraceViewerPanel } from "@/components/trace/trace-viewer-panel";
+import { SampleToExperimentPanel } from "@/components/trace/sample-to-experiment-panel";
 import { PageHeader } from "@/components/shell/page-header";
 import { KpiCard } from "@/components/shell/kpi-card";
 import { formatTokens, formatDuration, formatRelativeTime } from "@/lib/format";
@@ -59,6 +60,12 @@ export default function TraceListPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(1);
   const [selectedSession, setSelectedSession] = useState<SessionItem | null>(null);
+  const [timeWindow, setTimeWindow] = useState("all");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [errorsOnly, setErrorsOnly] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [samplePanelOpen, setSamplePanelOpen] = useState(false);
 
   const loadSessions = useCallback(() => {
     setLoading(true);
@@ -104,12 +111,65 @@ export default function TraceListPage() {
     }
     if (agentFilter !== "all") result = result.filter((s) => s.agentId === agentFilter);
     if (statusFilter !== "all") result = result.filter((s) => s.status === statusFilter);
+    if (timeWindow !== "all") {
+      const now = Date.now();
+      result = result.filter((s) => {
+        const t = new Date(s.startTime).getTime();
+        if (timeWindow === "custom") {
+          if (customStart) {
+            const start = new Date(`${customStart}T00:00:00`).getTime();
+            if (t < start) return false;
+          }
+          if (customEnd) {
+            const end = new Date(`${customEnd}T23:59:59.999`).getTime();
+            if (t > end) return false;
+          }
+          return true;
+        }
+        const days = Number(timeWindow);
+        return t >= now - days * 86400000;
+      });
+    }
+    if (errorsOnly) result = result.filter((s) => s.errorCount > 0);
     return result;
-  }, [sessions, search, agentFilter, statusFilter]);
+  }, [sessions, search, agentFilter, statusFilter, timeWindow, customStart, customEnd, errorsOnly]);
+
+  // 筛选变化时，同步清掉已不在筛选结果里的选中项
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      const ids = new Set(filtered.map((s) => s.id));
+      const next = new Set([...prev].filter((id) => ids.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [filtered]);
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   const paged = useMemo(
     () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
     [filtered, page],
+  );
+
+  const pagedAllSelected = paged.length > 0 && paged.every((s) => selectedIds.has(s.id));
+  const toggleSelectPage = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (pagedAllSelected) paged.forEach((s) => next.delete(s.id));
+      else paged.forEach((s) => next.add(s.id));
+      return next;
+    });
+  };
+
+  const selectedSessions = useMemo(
+    () => sessions.filter((s) => selectedIds.has(s.id)),
+    [sessions, selectedIds]
   );
 
   const totalSessions = sessions.length;
@@ -192,7 +252,64 @@ export default function TraceListPage() {
             <SelectItem value="error">异常</SelectItem>
           </SelectContent>
         </Select>
+        <Select value={timeWindow} onValueChange={(v) => { setTimeWindow(v ?? "all"); setPage(1); }}>
+          <SelectTrigger className="h-8 w-[120px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部时间</SelectItem>
+            <SelectItem value="1">近 1 天</SelectItem>
+            <SelectItem value="7">近 7 天</SelectItem>
+            <SelectItem value="30">近 30 天</SelectItem>
+            <SelectItem value="custom">自定义</SelectItem>
+          </SelectContent>
+        </Select>
+        {timeWindow === "custom" && (
+          <>
+            <Input
+              type="date"
+              value={customStart}
+              onChange={(e) => { setCustomStart(e.target.value); setPage(1); }}
+              className="h-8 w-[140px]"
+            />
+            <span className="text-xs text-muted-foreground">至</span>
+            <Input
+              type="date"
+              value={customEnd}
+              onChange={(e) => { setCustomEnd(e.target.value); setPage(1); }}
+              className="h-8 w-[140px]"
+            />
+          </>
+        )}
+        <button
+          onClick={() => { setErrorsOnly((v) => !v); setPage(1); }}
+          className={`h-8 rounded-md px-3 text-xs transition-colors ${
+            errorsOnly
+              ? "bg-destructive/10 text-destructive ring-1 ring-destructive/40"
+              : "bg-muted/40 text-muted-foreground ring-1 ring-foreground/10 hover:ring-foreground/25"
+          }`}
+        >
+          仅看有错误
+        </button>
+        <div className="flex-1" />
+        <Button
+          size="sm"
+          className="h-8"
+          disabled={selectedIds.size === 0}
+          onClick={() => setSamplePanelOpen(true)}
+        >
+          <FlaskConical className="h-3.5 w-3.5" />
+          抽样到实验({selectedIds.size})
+        </Button>
       </div>
+
+      {/* 抽样到实验弹层 */}
+      <SampleToExperimentPanel
+        open={samplePanelOpen}
+        onClose={() => setSamplePanelOpen(false)}
+        sessions={selectedSessions.map((s) => ({ id: s.id, agentId: s.agentId, agentName: s.agentName }))}
+        onDone={() => setSelectedIds(new Set())}
+      />
 
       {/* Slide-in Detail Panel */}
       <TraceViewerPanel
@@ -207,6 +324,23 @@ export default function TraceListPage() {
           <Table>
             <TableHeader className="sticky top-0 z-10">
                <TableRow className="bg-card hover:bg-card">
+                 <TableHead className="w-[40px] text-center">
+                   <button
+                     onClick={(e) => { e.stopPropagation(); toggleSelectPage(); }}
+                     aria-label="全选当前页"
+                     className={`flex h-4 w-4 items-center justify-center rounded border transition-colors ${
+                       pagedAllSelected
+                         ? "border-primary bg-primary text-primary-foreground"
+                         : "border-foreground/30 hover:border-foreground/60"
+                     }`}
+                   >
+                     {pagedAllSelected && (
+                       <svg viewBox="0 0 12 12" className="h-3 w-3" fill="none">
+                         <path d="M2.5 6.5L5 9L9.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                       </svg>
+                     )}
+                   </button>
+                 </TableHead>
                  <TableHead className="w-[110px] text-xs">Session ID</TableHead>
                  <TableHead className="w-[140px] text-xs">Agent</TableHead>
                  <TableHead className="w-[90px] text-xs">用户</TableHead>
@@ -228,6 +362,23 @@ export default function TraceListPage() {
                   className="h-11 cursor-pointer transition-colors hover:bg-muted/30"
                   onClick={() => setSelectedSession(session)}
                 >
+                   <TableCell className="text-center" onClick={(e) => e.stopPropagation()}>
+                     <button
+                       onClick={(e) => { e.stopPropagation(); toggleSelect(session.id); }}
+                       aria-label="选择该 Session"
+                       className={`mx-auto flex h-4 w-4 items-center justify-center rounded border transition-colors ${
+                         selectedIds.has(session.id)
+                           ? "border-primary bg-primary text-primary-foreground"
+                           : "border-foreground/30 hover:border-foreground/60"
+                       }`}
+                     >
+                       {selectedIds.has(session.id) && (
+                         <svg viewBox="0 0 12 12" className="h-3 w-3" fill="none">
+                           <path d="M2.5 6.5L5 9L9.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                         </svg>
+                       )}
+                     </button>
+                   </TableCell>
                    <TableCell className="font-mono text-xs text-muted-foreground">{session.id}</TableCell>
                   <TableCell>
                     <span className="text-[13px] font-medium">{session.agentName}</span>

@@ -50,3 +50,4 @@ next-env.d.ts
 .tmp-shots/
 scripts/offline-server-pkg-win64/
 scripts/offline-server-pkg-win64/
+.next-*.log

@@ -8,6 +8,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { useEvaluators } from "@/hooks/use-evaluators";
+import {
+  EvaluatorConfigForm,
+  isConfigValid,
+} from "@/components/experiments/evaluator-config-form";
 
 interface Agent {
   id: string;
@@ -25,30 +30,16 @@ interface Session {
   totalTokens: number;
 }
 
-interface Evaluator {
-  id: string;
-  name: string;
-  description: string;
-  category: string;
-}
-
-const presetEvaluators: Evaluator[] = [
-  { id: "accuracy", name: "准确性", description: "对比参考答案评估输出正确性（需填写参考答案）", category: "结果" },
-  { id: "answer-quality", name: "答案质量", description: "评估相关性、完整性、连贯性", category: "结果" },
-  { id: "faithfulness", name: "忠实度", description: "验证输出是否有执行轨迹证据支撑", category: "结果" },
-  { id: "instruction-adherence", name: "指令遵循", description: "检查是否遵循系统指令", category: "结果" },
-  { id: "trajectory-quality", name: "轨迹质量", description: "分析执行轨迹的完整性、工具选择、冗余度", category: "轨迹" },
-  { id: "task-completion", name: "任务完成度", description: "评估任务关键观点的覆盖度（需填写参考答案）", category: "轨迹" },
-];
-
 const steps = ["基本信息", "选择评估器", "选择 Session", "填写参考答案", "确认创建"];
 
 export default function NewExperimentPage() {
   const router = useRouter();
+  const { evaluators, byId, nameOf, loading: evaluatorsLoading } = useEvaluators();
   const [currentStep, setCurrentStep] = useState(0);
   const [name, setName] = useState("");
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [selectedEvaluators, setSelectedEvaluators] = useState<string[]>([]);
+  const [evaluatorConfig, setEvaluatorConfig] = useState<Record<string, Record<string, unknown>>>({});
   const [selectedSessions, setSelectedSessions] = useState<string[]>([]);
   const [referenceOutputs, setReferenceOutputs] = useState<Record<string, string>>({});
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -89,14 +80,28 @@ export default function NewExperimentPage() {
     setReferenceOutputs((prev) => ({ ...prev, [sessionId]: value }));
   };
 
-  const needsReference = selectedEvaluators.includes("accuracy") || selectedEvaluators.includes("task-completion");
+  const setEvaluatorConfigValue = (evaluatorId: string, key: string, value: unknown) => {
+    setEvaluatorConfig((prev) => ({
+      ...prev,
+      [evaluatorId]: { ...prev[evaluatorId], [key]: value },
+    }));
+  };
+
+  const needsReference = selectedEvaluators.some((id) => byId[id]?.needsReference);
 
   const canProceed = () => {
     switch (currentStep) {
       case 0:
         return name.trim() && selectedAgentId;
       case 1:
-        return selectedEvaluators.length > 0;
+        return (
+          selectedEvaluators.length > 0 &&
+          selectedEvaluators.every((id) => {
+            const meta = byId[id];
+            if (!meta || meta.type !== "rule") return true;
+            return isConfigValid(meta, evaluatorConfig[id]);
+          })
+        );
       case 2:
         return selectedSessions.length > 0;
       case 3:
@@ -122,6 +127,7 @@ export default function NewExperimentPage() {
           name,
           agentId: selectedAgentId,
           evaluatorIds: selectedEvaluators,
+          evaluatorConfigJson: JSON.stringify(evaluatorConfig),
           cases,
         }),
       });
@@ -214,29 +220,54 @@ export default function NewExperimentPage() {
               <CardTitle>选择评估器</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-                {presetEvaluators.map((ev) => (
-                  <button
-                    key={ev.id}
-                    onClick={() => toggleEvaluator(ev.id)}
-                    className={`flex flex-col items-start rounded-md p-3.5 text-left transition-colors ${
-                      selectedEvaluators.includes(ev.id)
-                        ? "bg-primary/5 ring-1 ring-primary/40"
-                        : "ring-1 ring-foreground/10 hover:ring-foreground/25"
-                    }`}
-                  >
-                    <div className="mb-1.5 flex w-full items-center justify-between">
-                      <span className="text-[13px] font-medium">{ev.name}</span>
-                      <Badge variant="secondary">{ev.category}</Badge>
-                    </div>
-                    <p className="text-xs leading-relaxed text-muted-foreground">{ev.description}</p>
-                  </button>
-                ))}
-              </div>
-              {selectedEvaluators.length > 0 && (
-                <p className="mt-3 text-sm text-muted-foreground">
-                  已选择 {selectedEvaluators.length} 个评估器
-                </p>
+              {evaluatorsLoading ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">加载评估器中...</p>
+              ) : (
+                <>
+                  <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                    {evaluators.map((ev) => (
+                      <button
+                        key={ev.id}
+                        onClick={() => toggleEvaluator(ev.id)}
+                        className={`flex flex-col items-start rounded-md p-3.5 text-left transition-colors ${
+                          selectedEvaluators.includes(ev.id)
+                            ? "bg-primary/5 ring-1 ring-primary/40"
+                            : "ring-1 ring-foreground/10 hover:ring-foreground/25"
+                        }`}
+                      >
+                        <div className="mb-1.5 flex w-full items-center justify-between">
+                          <span className="text-[13px] font-medium">{ev.name}</span>
+                          <Badge variant={ev.type === "rule" ? "outline" : "secondary"}>
+                            {ev.category}
+                          </Badge>
+                        </div>
+                        <p className="text-xs leading-relaxed text-muted-foreground">{ev.description}</p>
+                      </button>
+                    ))}
+                  </div>
+                  {selectedEvaluators.length > 0 && (
+                    <p className="mt-3 text-sm text-muted-foreground">
+                      已选择 {selectedEvaluators.length} 个评估器
+                    </p>
+                  )}
+                  {/* 规则评估器参数配置（实验级，对该实验全部用例生效） */}
+                  {selectedEvaluators
+                    .map((id) => byId[id])
+                    .filter((meta) => meta && meta.type === "rule")
+                    .map((meta) => (
+                      <div key={meta.id} className="mt-4 rounded-md p-4 ring-1 ring-foreground/10">
+                        <div className="mb-3 flex items-center gap-2">
+                          <span className="text-[13px] font-medium">{meta.name} · 参数</span>
+                          <Badge variant="outline">规则</Badge>
+                        </div>
+                        <EvaluatorConfigForm
+                          meta={meta}
+                          value={evaluatorConfig[meta.id] ?? {}}
+                          onChange={(key, val) => setEvaluatorConfigValue(meta.id, key, val)}
+                        />
+                      </div>
+                    ))}
+                </>
               )}
             </CardContent>
           </Card>
@@ -298,7 +329,7 @@ export default function NewExperimentPage() {
               <CardTitle>填写参考答案</CardTitle>
               {needsReference ? (
                 <p className="text-sm text-muted-foreground">
-                  你选择了"准确性"或"任务完成度"评估器，建议为每个 Session 填写参考答案以获得更准确的评测结果。
+                  你选择了需要参考答案的评估器，建议为每个 Session 填写参考答案以获得更准确的评测结果。
                 </p>
               ) : (
                 <p className="text-sm text-muted-foreground">
@@ -348,7 +379,9 @@ export default function NewExperimentPage() {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[13px] text-muted-foreground">评估器</span>
-                  <span className="text-[13px] font-medium">{selectedEvaluators.join(", ")}</span>
+                  <span className="text-[13px] font-medium">
+                    {selectedEvaluators.map((id) => nameOf(id)).join("、")}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[13px] text-muted-foreground">Session 数量</span>

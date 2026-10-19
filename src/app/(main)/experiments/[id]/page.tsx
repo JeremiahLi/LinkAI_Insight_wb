@@ -18,6 +18,8 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { PageHeader } from "@/components/shell/page-header";
 import { KpiCard } from "@/components/shell/kpi-card";
+import { useEvaluators } from "@/hooks/use-evaluators";
+import { VerdictBadge } from "@/components/experiments/verdict-badge";
 
 interface EvalResult {
   id: string;
@@ -44,15 +46,6 @@ interface ExperimentDetail {
   cases: ExperimentCase[];
 }
 
-const evaluatorNames: Record<string, string> = {
-  accuracy: "准确性",
-  "answer-quality": "答案质量",
-  faithfulness: "忠实度",
-  "instruction-adherence": "指令遵循",
-  "trajectory-quality": "轨迹质量",
-  "task-completion": "任务完成度",
-};
-
 const statusIcon = {
   pending: <AlertCircle className="h-3.5 w-3.5 text-muted-foreground" />,
   running: <Loader2 className="h-3.5 w-3.5 animate-spin text-info" />,
@@ -63,6 +56,7 @@ const statusIcon = {
 export default function ExperimentDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const { nameOf } = useEvaluators();
   const id = params.id as string;
   const [experiment, setExperiment] = useState<ExperimentDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -164,7 +158,7 @@ export default function ExperimentDetailPage() {
         {experiment.evaluatorScores.map((es) => (
           <KpiCard
             key={es.evaluatorId}
-            label={evaluatorNames[es.evaluatorId] || es.evaluatorId}
+            label={nameOf(es.evaluatorId)}
             value={es.averageScore !== null ? es.averageScore.toFixed(1) : "—"}
             sub={`${es.scoredCount} 个评分`}
           />
@@ -194,9 +188,10 @@ export default function ExperimentDetailPage() {
                 <th className="px-3 py-2 text-left text-[11px] font-medium">Session</th>
                 {experiment.evaluatorScores.map((es) => (
                   <th key={es.evaluatorId} className="px-3 py-2 text-center text-[11px] font-medium">
-                    {evaluatorNames[es.evaluatorId] || es.evaluatorId}
+                    {nameOf(es.evaluatorId)}
                   </th>
                 ))}
+                <th className="px-3 py-2 text-center text-[11px] font-medium">结论</th>
                 <th className="px-3 py-2 text-center text-[11px] font-medium">操作</th>
               </tr>
             </thead>
@@ -243,6 +238,24 @@ export default function ExperimentDetailPage() {
                       </td>
                     );
                   })}
+                  <td className="px-3 py-2">
+                    <div className="flex flex-wrap items-center justify-center gap-1">
+                      {experiment.evaluatorScores.map((es) => {
+                        const r = expCase.results.find(
+                          (x) => x.evaluatorId === es.evaluatorId && x.status === "done"
+                        );
+                        if (!r) return null;
+                        return (
+                          <span
+                            key={es.evaluatorId}
+                            title={`${nameOf(es.evaluatorId)}：${r.summary ?? "—"}`}
+                          >
+                            <VerdictBadge verdict={r.verdict} />
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </td>
                   <td className="px-3 py-2 text-center">
                     <Link href={`/experiments/${id}/cases/${expCase.id}`}>
                       <Button variant="ghost" size="xs">

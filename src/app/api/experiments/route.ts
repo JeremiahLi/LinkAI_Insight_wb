@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
+import { extractSessionData } from "@/lib/engine/experiment/session-data";
 
 const prisma = new PrismaClient();
 
@@ -28,35 +29,26 @@ export async function GET() {
   return NextResponse.json(result);
 }
 
-async function extractSessionData(sessionId: string): Promise<{ input: string; actualOutput: string }> {
-  if (!sessionId) return { input: "", actualOutput: "" };
-
-  const spans = await prisma.span.findMany({
-    where: { sessionId },
-    orderBy: [{ roundIndex: "asc" }, { turnId: "asc" }],
-  });
-
-  let input = "";
-  let actualOutput = "";
-
-  for (const span of spans) {
-    if (span.kind === "user" && span.input && !input) {
-      input = span.input;
-    }
-    if (span.kind === "answer" && span.output && !actualOutput) {
-      actualOutput = span.output;
-    }
-  }
-
-  return { input, actualOutput };
-}
-
 export async function POST(request: Request) {
   const body = await request.json();
-  const { name, type, agentId, evaluatorIds, cases, caseIds, scope } = body;
+  const { name, type, agentId, evaluatorIds, evaluatorConfigJson, cases, caseIds, scope } = body;
 
   if (!name || !agentId || !evaluatorIds) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+  }
+
+  // 规则评估器参数（实验级）：必须是合法 JSON 对象
+  let normalizedConfig = "{}";
+  if (evaluatorConfigJson !== undefined && evaluatorConfigJson !== null && evaluatorConfigJson !== "") {
+    try {
+      const parsed = typeof evaluatorConfigJson === "string" ? JSON.parse(evaluatorConfigJson) : evaluatorConfigJson;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return NextResponse.json({ error: "evaluatorConfigJson 必须是 JSON 对象" }, { status: 400 });
+      }
+      normalizedConfig = JSON.stringify(parsed);
+    } catch {
+      return NextResponse.json({ error: "evaluatorConfigJson 必须是合法 JSON" }, { status: 400 });
+    }
   }
 
   const caseItems = cases || (caseIds?.map((id: string) => ({ sessionId: id })) ?? []);
@@ -84,6 +76,7 @@ export async function POST(request: Request) {
       type: type || "single",
       agentId,
       evaluatorIdsJson: JSON.stringify(evaluatorIds),
+      evaluatorConfigJson: normalizedConfig,
       scope: scope || "",
       status: "draft",
       cases: {

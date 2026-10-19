@@ -1,5 +1,5 @@
 import { PrismaClient } from "@prisma/client";
-import type { EvaluatorContext, ToolCall } from "./evaluators";
+import type { EvaluatorContext, ToolCall, ContextStats } from "./evaluators";
 
 const prisma = new PrismaClient();
 
@@ -18,10 +18,13 @@ export async function assembleContext(
     };
   }
 
-  const spans = await prisma.span.findMany({
-    where: { sessionId },
-    orderBy: [{ roundIndex: "asc" }, { turnId: "asc" }],
-  });
+  const [spans, session] = await Promise.all([
+    prisma.span.findMany({
+      where: { sessionId },
+      orderBy: [{ roundIndex: "asc" }, { turnId: "asc" }],
+    }),
+    prisma.session.findUnique({ where: { id: sessionId } }),
+  ]);
 
   let input = inputFallback;
   let actualOutput = actualOutputFallback;
@@ -44,10 +47,24 @@ export async function assembleContext(
     }
   }
 
+  // 会话级统计（供 threshold 等规则评估器使用）；totalDuration 为毫秒（Span.duration 之和）
+  let stats: ContextStats | undefined;
+  if (session) {
+    stats = {
+      totalTokens: session.totalTokens,
+      inputTokens: session.totalInputTokens,
+      outputTokens: session.totalOutputTokens,
+      durationMs: session.totalDuration,
+      errorCount: session.errorCount,
+      toolCallCount: trace.length,
+    };
+  }
+
   return {
     input: input || inputFallback,
     actualOutput: actualOutput || actualOutputFallback,
     referenceOutput: referenceOutput || undefined,
     trace,
+    stats,
   };
 }

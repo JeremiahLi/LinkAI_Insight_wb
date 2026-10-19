@@ -1,44 +1,20 @@
 import { PrismaClient } from "@prisma/client";
 import { getActiveLlmConfig, callLlmAsJson, type LlmConfig } from "./judge-llm";
+import { RULE_EVALUATORS } from "./rule-evaluators";
+import type { EvalOutput, EvaluatorContext, Evaluator, LlmEvaluator } from "./evaluator-types";
+
+export type { EvalOutput, EvaluatorContext, Evaluator, ToolCall, ContextStats } from "./evaluator-types";
 
 const prisma = new PrismaClient();
-
-export interface EvalOutput {
-  score: number;
-  confidence: number;
-  verdict: "pass" | "warn" | "fail";
-  summary: string;
-  evidence: Record<string, unknown>;
-}
-
-export interface EvaluatorContext {
-  input: string;
-  actualOutput: string;
-  referenceOutput?: string;
-  trace: ToolCall[];
-}
-
-export interface ToolCall {
-  name: string;
-  input: string;
-  output: string;
-  error?: string;
-}
-
-export interface Evaluator {
-  id: string;
-  name: string;
-  description: string;
-  systemPrompt: string;
-  buildUserPrompt: (ctx: EvaluatorContext) => string;
-  parseResponse: (response: unknown) => EvalOutput;
-}
 
 const EVALUATORS: Evaluator[] = [
   {
     id: "accuracy",
     name: "准确性",
     description: "对比参考答案评估输出正确性",
+    type: "llm",
+    category: "结果",
+    needsReference: false,
     systemPrompt: `你是一个精确的评测专家。你的任务是评估"实际输出"的准确性。
 
 重要规则：
@@ -92,6 +68,9 @@ ${ctx.input || "（未知）"}
     id: "answer-quality",
     name: "答案质量",
     description: "评估输出的相关性、完整性和连贯性",
+    type: "llm",
+    category: "结果",
+    needsReference: false,
     systemPrompt: `你是一个专业的答案质量评估专家。请从以下维度评估答案质量：
 
 1. 相关性（0-100）：答案是否切题，是否回答了用户的问题
@@ -135,6 +114,9 @@ ${ctx.actualOutput}
     id: "faithfulness",
     name: "忠实度",
     description: "验证输出是否可被执行轨迹证据支撑",
+    type: "llm",
+    category: "轨迹",
+    needsReference: false,
     systemPrompt: `你是一个严谨的事实核查专家。你的任务是验证"实际输出"中的主张是否有"执行轨迹"中的证据支撑。
 
 评判步骤：
@@ -180,6 +162,9 @@ ${ctx.actualOutput}
     id: "instruction-adherence",
     name: "指令遵循",
     description: "检查输出是否遵循系统指令和用户要求",
+    type: "llm",
+    category: "结果",
+    needsReference: false,
     systemPrompt: `你是指令遵循评估专家。你的任务是检查"实际输出"是否遵循了"系统指令"和"用户要求"。
 
 评判步骤：
@@ -225,6 +210,9 @@ ${ctx.actualOutput}
     id: "trajectory-quality",
     name: "轨迹质量",
     description: "分析执行轨迹的完整性、工具选择和冗余度",
+    type: "llm",
+    category: "轨迹",
+    needsReference: false,
     systemPrompt: `你是执行轨迹质量评估专家。请从以下维度评估 Agent 的执行轨迹：
 
 1. 完整性（权重 0.45）：执行步骤是否完整，是否完成了所有必要操作
@@ -270,6 +258,9 @@ ${ctx.actualOutput}
     id: "task-completion",
     name: "任务完成度",
     description: "评估任务关键观点的覆盖程度",
+    type: "llm",
+    category: "结果",
+    needsReference: true,
     systemPrompt: `你是任务完成度评估专家。你的任务是评估"实际输出"对用户任务的完成程度。
 
 重要规则：
@@ -327,32 +318,41 @@ ${ctx.actualOutput}
 ];
 
 export function getEvaluatorById(id: string): Evaluator | undefined {
-  return EVALUATORS.find((e) => e.id === id);
+  return ALL_EVALUATORS.find((e) => e.id === id);
 }
 
 export function getAllEvaluators(): Evaluator[] {
-  return EVALUATORS;
+  return ALL_EVALUATORS;
 }
+
+const ALL_EVALUATORS: Evaluator[] = [...EVALUATORS, ...RULE_EVALUATORS];
 
 export async function runEvaluator(
   evaluatorId: string,
-  context: EvaluatorContext
+  context: EvaluatorContext,
+  ruleConfig?: Record<string, unknown>
 ): Promise<EvalOutput> {
   const evaluator = getEvaluatorById(evaluatorId);
   if (!evaluator) {
     throw new Error(`Unknown evaluator: ${evaluatorId}`);
   }
 
+  // 规则评估器：纯同步确定性计算，不依赖 LLM 配置
+  if (evaluator.type === "rule") {
+    return evaluator.evaluate(context, ruleConfig ?? {});
+  }
+
+  const llmEvaluator = evaluator as LlmEvaluator;
   const config = await getActiveLlmConfig();
   if (!config) {
     throw new Error("No LLM config available. Please configure in Settings.");
   }
 
   const messages = [
-    { role: "system" as const, content: evaluator.systemPrompt },
-    { role: "user" as const, content: evaluator.buildUserPrompt(context) },
+    { role: "system" as const, content: llmEvaluator.systemPrompt },
+    { role: "user" as const, content: llmEvaluator.buildUserPrompt(context) },
   ];
 
   const response = await callLlmAsJson(messages, config);
-  return evaluator.parseResponse(response);
+  return llmEvaluator.parseResponse(response);
 }

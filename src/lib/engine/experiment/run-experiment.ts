@@ -64,6 +64,17 @@ export async function runExperiment(
     c.results.filter((r) => r.status === "pending" || r.status === "failed")
   );
 
+  // 实验级规则评估器配置：Record<evaluatorId, params>
+  let configMap: Record<string, Record<string, unknown>> = {};
+  try {
+    const parsed = JSON.parse(experiment.evaluatorConfigJson || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      configMap = parsed;
+    }
+  } catch {
+    console.error("Invalid evaluatorConfigJson for experiment:", experimentId);
+  }
+
   const total = pendingResults.length;
   let done = 0;
 
@@ -86,7 +97,7 @@ export async function runExperiment(
       );
 
       const startTime = Date.now();
-      const output = await runEvaluator(result.evaluatorId, context);
+      const output = await runEvaluator(result.evaluatorId, context, configMap[result.evaluatorId]);
       const durationMs = Date.now() - startTime;
 
       await prisma.experimentEvalResult.update({

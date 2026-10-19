@@ -15,6 +15,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shell/page-header";
+import { useEvaluators } from "@/hooks/use-evaluators";
+import { VerdictBadge } from "@/components/experiments/verdict-badge";
+import { EvidenceViewer } from "@/components/experiments/evidence-viewer";
 
 
 interface CaseDetail {
@@ -39,15 +42,6 @@ interface CaseDetail {
   }[];
 }
 
-const evaluatorNames: Record<string, string> = {
-  accuracy: "准确性",
-  "answer-quality": "答案质量",
-  faithfulness: "忠实度",
-  "instruction-adherence": "指令遵循",
-  "trajectory-quality": "轨迹质量",
-  "task-completion": "任务完成度",
-};
-
 const statusConfig: Record<string, { icon: React.ReactNode; label: string }> = {
   pending: { icon: <AlertCircle className="h-3.5 w-3.5 text-muted-foreground" />, label: "待评测" },
   running: { icon: <Loader2 className="h-3.5 w-3.5 animate-spin text-info" />, label: "评测中" },
@@ -58,6 +52,7 @@ const statusConfig: Record<string, { icon: React.ReactNode; label: string }> = {
 export default function CaseDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const { nameOf } = useEvaluators();
   const experimentId = params.id as string;
   const caseId = params.caseId as string;
   const [caseData, setCaseData] = useState<CaseDetail | null>(null);
@@ -66,20 +61,22 @@ export default function CaseDetailPage() {
   const [editScoreValue, setEditScoreValue] = useState("");
   const [editReasonValue, setEditReasonValue] = useState("");
 
+  const applyCase = (found: any) => {
+    setCaseData({
+      ...found,
+      input: found.input || "",
+      actualOutput: found.actualOutput || "",
+      hasRealOutput: found.hasRealOutput ?? false,
+      referenceOutput: found.referenceOutput || null,
+    });
+  };
+
   const fetchDetail = () => {
     fetch(`/api/experiments/${experimentId}`)
       .then((r) => r.json())
       .then((data) => {
         const found = data.cases?.find((c: any) => c.id === caseId);
-        if (found) {
-          setCaseData({
-            ...found,
-            input: found.input || "",
-            actualOutput: found.actualOutput || "",
-            hasRealOutput: found.hasRealOutput ?? false,
-            referenceOutput: found.referenceOutput || null,
-          });
-        }
+        if (found) applyCase(found);
       })
       .catch(() => setCaseData(null))
       .finally(() => setLoading(false));
@@ -94,6 +91,26 @@ export default function CaseDetailPage() {
       method: "POST",
     });
     fetchDetail();
+    // 轮询直到该结果离开 pending/running（上限 60s），让用户看到完整流转
+    const startedAt = Date.now();
+    const poll = () => {
+      if (Date.now() - startedAt > 60000) return;
+      fetch(`/api/experiments/${experimentId}`)
+        .then((r) => r.json())
+        .then((data) => {
+          const found = data.cases?.find((c: any) => c.id === caseId);
+          if (!found) return;
+          applyCase(found);
+          const target = (found.results as any[] | undefined)?.find(
+            (r) => r.id === resultId
+          );
+          if (target && (target.status === "pending" || target.status === "running")) {
+            setTimeout(poll, 2000);
+          }
+        })
+        .catch(() => {});
+    };
+    setTimeout(poll, 2000);
   };
 
   const handleSaveScore = async (resultId: string) => {
@@ -192,6 +209,98 @@ export default function CaseDetailPage() {
         </Card>
       )}
 
+      {/* 评估结论总表 */}
+      <Card>
+        <CardHeader className="border-b border-border/60 pb-2.5">
+          <CardTitle>评估结论总表</CardTitle>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b border-border text-muted-foreground">
+                <th className="px-3 py-2 text-left text-[11px] font-medium">评估维度</th>
+                <th className="px-3 py-2 text-left text-[11px] font-medium">期望输出</th>
+                <th className="px-3 py-2 text-left text-[11px] font-medium">实际输出</th>
+                <th className="px-3 py-2 text-left text-[11px] font-medium">评估结论</th>
+                <th className="px-3 py-2 text-center text-[11px] font-medium">打分</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/60">
+              {caseData.results.map((result) => {
+                const status = statusConfig[result.status] || statusConfig.pending;
+                const finalScore = result.humanScore ?? result.score;
+                return (
+                  <tr key={result.id} className="align-top transition-colors hover:bg-muted/30">
+                    <td className="px-3 py-2">
+                      <div className="flex items-center gap-1.5">
+                        {status.icon}
+                        <span className="font-medium">{nameOf(result.evaluatorId)}</span>
+                      </div>
+                    </td>
+                    <td className="max-w-[200px] px-3 py-2">
+                      {caseData.referenceOutput ? (
+                        <span className="line-clamp-2 break-all text-muted-foreground" title={caseData.referenceOutput}>
+                          {caseData.referenceOutput}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </td>
+                    <td className="max-w-[200px] px-3 py-2">
+                      <span className="line-clamp-2 break-all text-muted-foreground" title={caseData.actualOutput}>
+                        {caseData.actualOutput || "—"}
+                      </span>
+                    </td>
+                    <td className="max-w-[260px] px-3 py-2">
+                      <div className="flex items-center gap-1.5">
+                        {result.status === "done" ? (
+                          <VerdictBadge verdict={result.verdict} />
+                        ) : (
+                          <Badge variant="secondary">{status.label}</Badge>
+                        )}
+                      </div>
+                      {result.summary && (
+                        <p className="mt-1 line-clamp-2 text-xs text-muted-foreground" title={result.summary}>
+                          {result.summary}
+                        </p>
+                      )}
+                      {result.errorMessage && (
+                        <p className="mt-1 line-clamp-2 text-xs text-destructive" title={result.errorMessage}>
+                          {result.errorMessage}
+                        </p>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      {result.status === "done" && finalScore !== null ? (
+                        <span
+                          className={`font-mono font-semibold tabular-nums ${
+                            finalScore >= 80 ? "text-success" : finalScore >= 60 ? "text-warning" : "text-destructive"
+                          }`}
+                        >
+                          {finalScore.toFixed(0)}
+                          {result.humanScore !== null && (
+                            <span className="ml-1 text-[11px] font-normal text-muted-foreground">(人工)</span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {caseData.results.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="px-3 py-6 text-center text-muted-foreground">
+                    暂无评估结果，请先在实验详情页运行实验
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </CardContent>
+      </Card>
+
       {/* 评估结果 */}
       <Card className="flex min-h-0 flex-col">
         <CardHeader className="border-b border-border/60 pb-2.5">
@@ -206,7 +315,7 @@ export default function CaseDetailPage() {
                   <div className="flex items-center gap-2">
                     {status.icon}
                     <span className="text-[13px] font-medium">
-                      {evaluatorNames[result.evaluatorId] || result.evaluatorId}
+                      {nameOf(result.evaluatorId)}
                     </span>
                     <Badge variant="secondary">
                       {status.label}
@@ -247,6 +356,13 @@ export default function CaseDetailPage() {
 
                 {result.errorMessage && (
                   <p className="mb-2 text-[13px] text-destructive">{result.errorMessage}</p>
+                )}
+
+                {result.status === "done" && result.evidenceJson && (
+                  <div className="mt-2 rounded-md bg-muted/30 p-3">
+                    <p className="mb-2 text-[11px] font-medium text-muted-foreground">评分依据</p>
+                    <EvidenceViewer evidenceJson={result.evidenceJson} />
+                  </div>
                 )}
 
                 {result.status === "done" && (

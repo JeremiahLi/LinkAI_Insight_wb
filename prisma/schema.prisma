@@ -160,6 +160,7 @@ model Experiment {
   type             String   @default("single")
   agentId          String
   evaluatorIdsJson String   @default("[]")
+  evaluatorConfigJson String @default("{}")
   status           String   @default("draft")
   scope            String   @default("")
   watchMode        Boolean  @default(false)

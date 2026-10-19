@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
+import { runExperiment } from "@/lib/engine/experiment/run-experiment";
 
 const prisma = new PrismaClient();
 
@@ -26,5 +27,28 @@ export async function POST(
     },
   });
 
-  return NextResponse.json(result);
+  // 重置状态后立即触发重跑：runExperiment 会捞取 pending/failed 的结果执行。
+  // 实验正在运行时不重复启动，避免并发重跑；本次重置会在下次运行时被拾起。
+  const experiment = await prisma.experiment.findUnique({
+    where: { id: existing.experimentId },
+    select: { status: true },
+  });
+
+  if (experiment?.status === "running") {
+    return NextResponse.json({
+      ok: true,
+      started: false,
+      note: "实验正在运行中，本次重置将在下次运行时执行",
+    });
+  }
+
+  runExperiment(existing.experimentId).catch(async (err) => {
+    console.error("Experiment run failed:", err);
+    await prisma.experiment.update({
+      where: { id: existing.experimentId },
+      data: { status: "failed" },
+    });
+  });
+
+  return NextResponse.json({ ok: true, started: true });
 }
