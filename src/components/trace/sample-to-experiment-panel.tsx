@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/select";
 import { SlidePanel } from "@/components/trace/slide-panel";
 import { useEvaluators } from "@/hooks/use-evaluators";
+import { EvaluatorPicker } from "@/components/experiments/evaluator-picker";
 import {
   EvaluatorConfigForm,
   isConfigValid,
@@ -77,12 +78,6 @@ export function SampleToExperimentPanel({ open, onClose, sessions, onDone }: Pro
       .catch(() => setExperiments([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, sessions]);
-
-  const toggleEvaluator = (id: string) => {
-    setSelectedEvaluators((prev) =>
-      prev.includes(id) ? prev.filter((e) => e !== id) : [...prev, id]
-    );
-  };
 
   const setConfigValue = (evaluatorId: string, key: string, value: unknown) => {
     setEvaluatorConfig((prev) => ({
@@ -240,27 +235,11 @@ export function SampleToExperimentPanel({ open, onClose, sessions, onDone }: Pro
                 <p className="text-sm text-muted-foreground">加载中...</p>
               ) : (
                 <>
-                  <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
-                    {evaluators.map((ev) => (
-                      <button
-                        key={ev.id}
-                        onClick={() => toggleEvaluator(ev.id)}
-                        className={`flex flex-col items-start rounded-md p-3 text-left transition-colors ${
-                          selectedEvaluators.includes(ev.id)
-                            ? "bg-primary/5 ring-1 ring-primary/40"
-                            : "ring-1 ring-foreground/10 hover:ring-foreground/25"
-                        }`}
-                      >
-                        <div className="mb-1 flex w-full items-center justify-between">
-                          <span className="text-[13px] font-medium">{ev.name}</span>
-                          <Badge variant={ev.type === "rule" ? "outline" : "secondary"}>
-                            {ev.category}
-                          </Badge>
-                        </div>
-                        <p className="text-xs leading-relaxed text-muted-foreground">{ev.description}</p>
-                      </button>
-                    ))}
-                  </div>
+                  <EvaluatorPicker
+                    evaluators={evaluators}
+                    selected={selectedEvaluators}
+                    onChange={setSelectedEvaluators}
+                  />
                   {selectedEvaluators
                     .map((id) => byId[id])
                     .filter((meta) => meta && meta.type === "rule")

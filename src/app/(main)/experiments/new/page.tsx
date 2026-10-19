@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { useEvaluators } from "@/hooks/use-evaluators";
+import { EvaluatorPicker } from "@/components/experiments/evaluator-picker";
 import {
   EvaluatorConfigForm,
   isConfigValid,
@@ -63,12 +64,6 @@ export default function NewExperimentPage() {
       setSessions([]);
     }
   }, [selectedAgentId]);
-
-  const toggleEvaluator = (id: string) => {
-    setSelectedEvaluators((prev) =>
-      prev.includes(id) ? prev.filter((e) => e !== id) : [...prev, id]
-    );
-  };
 
   const toggleSession = (id: string) => {
     setSelectedSessions((prev) =>
@@ -224,32 +219,16 @@ export default function NewExperimentPage() {
                 <p className="py-8 text-center text-sm text-muted-foreground">加载评估器中...</p>
               ) : (
                 <>
-                  <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-                    {evaluators.map((ev) => (
-                      <button
-                        key={ev.id}
-                        onClick={() => toggleEvaluator(ev.id)}
-                        className={`flex flex-col items-start rounded-md p-3.5 text-left transition-colors ${
-                          selectedEvaluators.includes(ev.id)
-                            ? "bg-primary/5 ring-1 ring-primary/40"
-                            : "ring-1 ring-foreground/10 hover:ring-foreground/25"
-                        }`}
-                      >
-                        <div className="mb-1.5 flex w-full items-center justify-between">
-                          <span className="text-[13px] font-medium">{ev.name}</span>
-                          <Badge variant={ev.type === "rule" ? "outline" : "secondary"}>
-                            {ev.category}
-                          </Badge>
-                        </div>
-                        <p className="text-xs leading-relaxed text-muted-foreground">{ev.description}</p>
-                      </button>
-                    ))}
-                  </div>
-                  {selectedEvaluators.length > 0 && (
-                    <p className="mt-3 text-sm text-muted-foreground">
-                      已选择 {selectedEvaluators.length} 个评估器
-                    </p>
-                  )}
+                  <EvaluatorPicker
+                  evaluators={evaluators}
+                  selected={selectedEvaluators}
+                  onChange={setSelectedEvaluators}
+                />
+                {selectedEvaluators.length > 0 && (
+                  <p className="mt-3 text-sm text-muted-foreground">
+                    已选择 {selectedEvaluators.length} 个评估器
+                  </p>
+                )}
                   {/* 规则评估器参数配置（实验级，对该实验全部用例生效） */}
                   {selectedEvaluators
                     .map((id) => byId[id])
