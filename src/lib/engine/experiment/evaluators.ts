@@ -7,8 +7,24 @@ export type { EvalOutput, EvaluatorContext, Evaluator, ToolCall, ContextStats } 
 
 const prisma = new PrismaClient();
 
-const EVALUATORS: Evaluator[] = [
-  {
+/**
+ * 无参考答案时对 LLM 评估结果降级：
+ * - verdict 不判 fail（最多 warn）——没有基准时低分大概率是评审模型的猜测
+ * - summary 追加"仅供参考"提示，前端展示时可识别
+ */
+function downgradeWithoutReference<T extends { verdict: string; summary: string; evidence: Record<string, unknown> }>(
+  parsed: T
+): T {
+  if (parsed.evidence?.noReference !== true) return parsed;
+  const out = { ...parsed };
+  if (out.verdict === "fail") out.verdict = "warn";
+  if (!out.summary.includes("无参考答案")) {
+    out.summary = `${out.summary}（无参考答案，评分仅供参考）`;
+  }
+  return out;
+}
+
+const EVALUATORS: Evaluator[] = [  {
     id: "accuracy",
     name: "准确性",
     description: "对比参考答案评估输出正确性",
@@ -60,7 +76,7 @@ ${ctx.input || "（未知）"}
 请评估实际输出的准确性。如果没有参考答案，请基于输出本身的合理性、逻辑性和完整性进行评估。`,
     parseResponse: (r) => {
       const res = r as any;
-      return {
+      return downgradeWithoutReference({
         score: Math.min(100, Math.max(0, res.score ?? 0)),
         confidence: Math.min(1, Math.max(0, res.confidence ?? 0.8)),
         verdict: res.verdict || "warn",
@@ -71,7 +87,7 @@ ${ctx.input || "（未知）"}
           issues: [],
           ...(res.evidence ?? {}),
         },
-      };
+      });
     },
   },
   {
@@ -372,7 +388,7 @@ ${ctx.actualOutput}
 请评估实际输出对任务关键观点的覆盖程度。如果没有参考答案，请根据用户问题推断关键完成点并评估。`,
     parseResponse: (r) => {
       const res = r as any;
-      return {
+      return downgradeWithoutReference({
         score: Math.min(100, Math.max(0, res.score ?? 0)),
         confidence: Math.min(1, Math.max(0, res.confidence ?? 0.8)),
         verdict: res.verdict || "warn",
@@ -383,7 +399,7 @@ ${ctx.actualOutput}
           issues: [],
           ...(res.evidence ?? {}),
         },
-      };
+      });
     },
   },
 ];

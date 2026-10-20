@@ -21,6 +21,29 @@ const GROUPS: GroupMeta[] = [
   { key: "llm", title: "基于 LLM 的评估器", hint: "由评审模型逐用例打分 · 消耗 token · 需在设置中配置评审模型" },
 ];
 
+// 推荐组合：规则做回归基线，LLM 只在关键维度抽检，避免 5 个高相关维度全开的冗余开销
+interface PresetMeta {
+  key: string;
+  label: string;
+  hint: string;
+  build: (grouped: { rule: EvaluatorMeta[]; llm: EvaluatorMeta[] }) => string[];
+}
+
+const PRESETS: PresetMeta[] = [
+  {
+    key: "rule-baseline",
+    label: "规则回归基线",
+    hint: "全部规则评估器 · 零 LLM 开销 · 适合高频回归",
+    build: ({ rule }) => rule.map((e) => e.id),
+  },
+  {
+    key: "rule-plus-llm",
+    label: "规则 + LLM 抽检",
+    hint: "全部规则 + 准确性 · 兼顾成本与语义评估",
+    build: ({ rule }) => [...rule.map((e) => e.id), "accuracy"],
+  },
+];
+
 /**
  * 评估器选择器：按「规则 / LLM」明显分栏，栏内支持一键全选/取消。
  * 供「新建实验」页与「trace 抽样到实验」弹层共用。
@@ -52,6 +75,32 @@ export function EvaluatorPicker({ evaluators, selected, onChange }: Props) {
 
   return (
     <div className="space-y-5">
+      {/* 推荐组合预设 */}
+      <div className="flex flex-wrap items-center gap-2 rounded-md bg-muted/30 p-2.5 ring-1 ring-foreground/5">
+        <span className="text-xs font-medium text-muted-foreground">推荐组合：</span>
+        {PRESETS.filter((p) =>
+          p.key !== "rule-plus-llm" || grouped.llm.some((e) => e.id === "accuracy")
+        ).map((preset) => {
+          const ids = preset.build(grouped);
+          const active = ids.length > 0 && ids.every((id) => selected.includes(id));
+          return (
+            <button
+              key={preset.key}
+              type="button"
+              title={preset.hint}
+              onClick={() => onChange(ids)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                active
+                  ? "bg-primary/10 text-primary ring-1 ring-primary/40"
+                  : "bg-background text-foreground ring-1 ring-foreground/15 hover:ring-foreground/30"
+              }`}
+            >
+              {preset.label}
+            </button>
+          );
+        })}
+      </div>
+
       {GROUPS.map((group) => {
         const list = grouped[group.key];
         if (list.length === 0) return null;

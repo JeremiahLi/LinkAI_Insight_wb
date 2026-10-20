@@ -11,6 +11,7 @@ import {
   XCircle,
   AlertCircle,
   RefreshCw,
+  GitCompareArrows,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,6 +21,8 @@ import { PageHeader } from "@/components/shell/page-header";
 import { KpiCard } from "@/components/shell/kpi-card";
 import { useEvaluators } from "@/hooks/use-evaluators";
 import { VerdictBadge } from "@/components/experiments/verdict-badge";
+import { ScoreHistogram } from "@/components/experiments/score-distribution";
+import { CommonIssues } from "@/components/experiments/common-issues";
 
 interface EvalResult {
   id: string;
@@ -29,6 +32,7 @@ interface EvalResult {
   summary: string | null;
   score: number | null;
   humanScore: number | null;
+  evidenceJson?: string | null;
 }
 
 interface ExperimentCase {
@@ -139,16 +143,24 @@ export default function ExperimentDetailPage() {
           </span>
         }
         actions={
-          (experiment.status === "draft" || experiment.status === "running") && (
-            <Button size="sm" onClick={handleRun} disabled={running || experiment.status === "running"}>
-              {running || experiment.status === "running" ? (
-                <Loader2 className="animate-spin" />
-              ) : (
-                <Play />
-              )}
-              {experiment.status === "running" ? "运行中..." : "运行实验"}
-            </Button>
-          )
+          <span className="flex items-center gap-2">
+            <Link href={`/experiments/compare?a=${id}`}>
+              <Button variant="outline" size="sm">
+                <GitCompareArrows className="h-3.5 w-3.5" />
+                对比其他实验
+              </Button>
+            </Link>
+            {(experiment.status === "draft" || experiment.status === "running") && (
+              <Button size="sm" onClick={handleRun} disabled={running || experiment.status === "running"}>
+                {running || experiment.status === "running" ? (
+                  <Loader2 className="animate-spin" />
+                ) : (
+                  <Play />
+                )}
+                {experiment.status === "running" ? "运行中..." : "运行实验"}
+              </Button>
+            )}
+          </span>
         }
       />
 
@@ -174,6 +186,59 @@ export default function ExperimentDetailPage() {
           </p>
         </div>
       )}
+
+      {/* 分数分布：均值掩盖的失败聚集在这里可见 */}
+      <Card>
+        <CardHeader className="border-b border-border/60 pb-2.5">
+          <CardTitle>分数分布</CardTitle>
+        </CardHeader>
+        <CardContent className="pt-4">
+          <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
+            {experiment.evaluatorScores.map((es) => {
+              const scores = experiment.cases
+                .flatMap((c) =>
+                  c.results
+                    .filter((r) => r.evaluatorId === es.evaluatorId && r.status === "done")
+                    .map((r) => r.humanScore ?? r.score)
+                )
+                .filter((s): s is number => s !== null);
+              return (
+                <div key={es.evaluatorId}>
+                  <div className="mb-2 flex items-baseline justify-between">
+                    <span className="text-[13px] font-medium">{nameOf(es.evaluatorId)}</span>
+                    <span className="font-mono text-xs text-muted-foreground tabular-nums">
+                      均值 {es.averageScore !== null ? es.averageScore.toFixed(1) : "—"} · {scores.length} 份
+                    </span>
+                  </div>
+                  {scores.length > 0 ? (
+                    <ScoreHistogram scores={scores} />
+                  ) : (
+                    <p className="py-6 text-center text-xs text-muted-foreground">暂无评分</p>
+                  )}
+                </div>
+              );
+            })}
+            {experiment.evaluatorScores.length === 0 && (
+              <p className="py-4 text-center text-sm text-muted-foreground">暂无评估器</p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 共性问题：跨 case 聚合，反复出现的问题才指导改 prompt */}
+      <Card>
+        <CardHeader className="border-b border-border/60 pb-2.5">
+          <CardTitle>共性问题</CardTitle>
+        </CardHeader>
+        <CardContent className="pt-4">
+          <CommonIssues
+            experimentId={id}
+            evaluatorIds={experiment.evaluatorScores.map((es) => es.evaluatorId)}
+            cases={experiment.cases}
+            nameOf={nameOf}
+          />
+        </CardContent>
+      </Card>
 
       {/* Case 明细表 */}
       <Card className="flex min-h-0 flex-col">

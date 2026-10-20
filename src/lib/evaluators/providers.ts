@@ -165,6 +165,18 @@ export const LLM_PROVIDERS: LlmProvider[] = [
     category: "china",
   },
   {
+    id: "longcat",
+    name: "美团 LongCat",
+    baseUrl: "https://api.longcat.chat/openai/v1",
+    defaultModel: "LongCat2",
+    suggestedModels: [
+      "LongCat2",
+      "LongCat-Flash-Thinking",
+      "LongCat-Flash-Chat",
+    ],
+    category: "china",
+  },
+  {
     id: "hunyuan",
     name: "腾讯混元 (Hunyuan)",
     baseUrl: "https://api.hunyuan.cloud.tencent.com/v1",

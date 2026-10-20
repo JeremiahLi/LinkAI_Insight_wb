@@ -94,6 +94,7 @@ export async function GET(
             summary: r.summary,
             score: r.score,
             humanScore: r.humanScore,
+            evidenceJson: r.evidenceJson,
             errorMessage: r.errorMessage,
           })),
         };

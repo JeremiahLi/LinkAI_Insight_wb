@@ -26,6 +26,8 @@ interface ModelConfig {
   id: string;
   name: string;
   provider: string;
+  /** 自定义提供商（不在 LLM_PROVIDERS 列表中）时的显示名 */
+  providerName?: string;
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -76,6 +78,7 @@ export default function SettingsPage() {
       setEditingConfig({
         ...editingConfig,
         provider: providerId,
+        providerName: providerId === "custom" ? editingConfig.providerName : undefined,
         baseUrl: provider.baseUrl,
         model: provider.defaultModel,
       });
@@ -221,7 +224,9 @@ export default function SettingsPage() {
                     <div className="flex items-center gap-2">
                       <span className="font-medium">{config.name}</span>
                       <Badge variant="secondary" className="text-xs">
-                        {LLM_PROVIDERS.find((p) => p.id === config.provider)?.name || config.provider}
+                        {config.providerName ||
+                          LLM_PROVIDERS.find((p) => p.id === config.provider)?.name ||
+                          config.provider}
                       </Badge>
                       {settings.activeConfigId === config.id && (
                         <Badge variant="default" className="text-xs">
@@ -315,7 +320,31 @@ export default function SettingsPage() {
                   </div>
                 ))}
               </div>
+              <button
+                onClick={() => handleProviderChange("custom")}
+                className={`mt-2 w-full rounded-md border border-dashed px-2.5 py-1.5 text-xs transition-all ${
+                  editingConfig.provider === "custom"
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-primary/30"
+                }`}
+              >
+                自定义模型（不在以上列表中）
+              </button>
             </div>
+            {editingConfig.provider === "custom" && (
+              <div>
+                <label className="text-sm font-medium mb-1.5 block">
+                  提供商名称 <span className="font-normal text-muted-foreground">（选填，用于展示）</span>
+                </label>
+                <Input
+                  value={editingConfig.providerName ?? ""}
+                  onChange={(e) =>
+                    setEditingConfig({ ...editingConfig, providerName: e.target.value })
+                  }
+                  placeholder="如：私有网关 / 某某平台"
+                />
+              </div>
+            )}
             <div>
               <label className="text-sm font-medium mb-1.5 block">API Key</label>
               <div className="flex gap-2">
