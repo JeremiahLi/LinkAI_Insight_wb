@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import {
   Activity,
@@ -8,7 +9,6 @@ import {
   Gauge,
   Bell,
   Settings,
-  Radar,
   Flame,
   Bot,
   TrendingUp,
@@ -47,11 +47,16 @@ export function AppSidebar() {
 
   return (
     <aside className="flex h-full w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
-      {/* 品牌区：单色 logo，无光晕 */}
+      {/* 品牌区：项目 logo */}
       <div className="flex h-14 items-center gap-2.5 px-4">
-        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-foreground text-background">
-          <Radar className="h-4 w-4" />
-        </div>
+        <Image
+          src="/logo.svg"
+          alt="LinkAI Insight"
+          width={28}
+          height={28}
+          className="h-7 w-7 rounded-md"
+          priority
+        />
         <div className="flex flex-col">
           <span className="text-sm font-semibold tracking-tight">LinkAI Insight</span>
           <span className="text-[11px] leading-tight text-muted-foreground">Agent 运维平台</span>

@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="hubGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0B2545"/>
+      <stop offset="55%" stop-color="#134E7A"/>
+      <stop offset="100%" stop-color="#0EA5A4"/>
+    </linearGradient>
+    <linearGradient id="nodeGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#13315C"/>
+      <stop offset="100%" stop-color="#0EA5A4"/>
+    </linearGradient>
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Connecting links -->
+  <g stroke="#1A6B8C" stroke-width="3" fill="none" opacity="0.85">
+    <line x1="256" y1="150" x2="256" y2="196"/>
+    <line x1="256" y1="316" x2="256" y2="362"/>
+    <line x1="148" y1="196" x2="196" y2="232"/>
+    <line x1="316" y1="232" x2="364" y2="196"/>
+    <line x1="148" y1="316" x2="196" y2="280"/>
+    <line x1="316" y1="280" x2="364" y2="316"/>
+  </g>
+
+  <!-- Satellite hex nodes -->
+  <g fill="url(#nodeGrad)" stroke="#0B2545" stroke-width="1.5">
+    <!-- top -->
+    <polygon points="256,110 286,128 286,162 256,180 226,162 226,128"/>
+    <!-- bottom -->
+    <polygon points="256,332 286,350 286,384 256,402 226,384 226,350"/>
+    <!-- top-left -->
+    <polygon points="132,172 162,190 162,224 132,242 102,224 102,190"/>
+    <!-- top-right -->
+    <polygon points="380,172 410,190 410,224 380,242 350,224 350,190"/>
+    <!-- bottom-left -->
+    <polygon points="132,292 162,310 162,344 132,362 102,344 102,310"/>
+    <!-- bottom-right -->
+    <polygon points="380,292 410,310 410,344 380,362 350,344 350,310"/>
+  </g>
+
+  <!-- Central hub hexagon -->
+  <polygon points="256,140 336,186 336,326 256,372 176,326 176,186"
+           fill="url(#hubGrad)" stroke="#0B2545" stroke-width="2"/>
+
+  <!-- ECG / pulse waveform -->
+  <polyline points="196,262 224,262 232,234 240,300 248,226 256,318 264,234 272,284 280,248 288,278 296,262 316,262"
+            fill="none" stroke="#3DFF9F" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" filter="url(#softGlow)"/>
+</svg>
