@@ -56,6 +56,18 @@ export async function POST(request: Request) {
 
   const inSpans = body.spans || [];
 
+// 数值字段收敛：旧版采集端（2026-07 前）会把 turnId 写成字符串（如 "loop-xxx#0"），
+// 其他数值字段也可能因历史格式异常传入非数字。Prisma Int 列校验严格，
+// 不收敛会导致整个会话 createMany 报 500。非数字/NaN 一律回退默认值。
+function toIntOr(v: unknown, fallback: number): number {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return Math.trunc(n);
+  }
+  return fallback;
+}
+
   var sessionStartSpan = inSpans.find(function(s: any) { return s.kind === 'session_start'; });
   var agentName = (sessionStartSpan && sessionStartSpan.agent_name) || 'pi-coding-agent';
 
@@ -130,18 +142,20 @@ export async function POST(request: Request) {
       const data = inSpans.map((s) => ({
         id: s.spanId || crypto.randomUUID(),
         sessionId: sessionID,
-        roundIndex: s.roundIndex ?? 0,
-        turnId: s.turnId ?? 0,
+        roundIndex: toIntOr(s.roundIndex, 0),
+        turnId: toIntOr(s.turnId, 0),
         kind: s.kind || "user",
         name: s.name || "",
         status: s.status || "success",
-        startTime: s.createdAt ? Math.floor(new Date(s.createdAt).getTime() / 1000) : 0,
-        duration: s.duration ?? 0,
-        inputTokens: s.tokens?.input ?? 0,
-        outputTokens: s.tokens?.output ?? 0,
-        cacheReadTokens: s.tokens?.cacheRead ?? 0,
-        cacheWriteTokens: s.tokens?.cacheWrite ?? 0,
-        totalTokens: s.tokens?.total ?? 0,
+        startTime: s.createdAt
+          ? Math.floor(new Date(s.createdAt).getTime() / 1000) || 0
+          : 0,
+        duration: toIntOr(s.duration, 0),
+        inputTokens: toIntOr(s.tokens?.input, 0),
+        outputTokens: toIntOr(s.tokens?.output, 0),
+        cacheReadTokens: toIntOr(s.tokens?.cacheRead, 0),
+        cacheWriteTokens: toIntOr(s.tokens?.cacheWrite, 0),
+        totalTokens: toIntOr(s.tokens?.total, 0),
         model: s.model ?? null,
         input: s.input ?? null,
         output: s.output ?? null,

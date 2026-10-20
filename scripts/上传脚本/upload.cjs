@@ -147,9 +147,16 @@ function buildSessionPayload(records) {
     }
     if (r.kind === 'session_shutdown') { session.endedAt = ts; continue; }
     if (r.kind === 'model_select') { modelEvents.push(r); continue; }
+    // 数值收敛：旧版采集记录的 turnId 可能是字符串（如 "loop-xxx#0"），
+    // 服务端 Span.turnId 是 Int 列，直接透传会导致整批 createMany 500。
+    var toIntOr = function(v, fb) {
+      if (typeof v === 'number' && isFinite(v)) return Math.trunc(v);
+      if (typeof v === 'string' && v.trim() !== '' && isFinite(Number(v))) return Math.trunc(Number(v));
+      return fb;
+    };
     const span = {
       spanId: r.spanId, kind: r.kind, name: r.name, status: r.status,
-      roundIndex: r.roundIndex, turnId: r.turnId,
+      roundIndex: toIntOr(r.roundIndex, 0), turnId: toIntOr(r.turnId, 0),
       input: null, output: null, tokens: null, model: null,
       toolCallId: null, toolName: null, isError: false, duration: null,
       llmThinkDuration: null, agentReplyDuration: null, toolDuration: null, details: null, content: null, createdAt: ts,
