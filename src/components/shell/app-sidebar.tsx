@@ -50,7 +50,7 @@ export function AppSidebar() {
       {/* 品牌区：项目 logo */}
       <div className="flex h-14 items-center gap-2.5 px-4">
         <Image
-          src="/logo.svg"
+          src="/logo.jpg"
           alt="LinkAI Insight"
           width={28}
           height={28}
