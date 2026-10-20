@@ -32,7 +32,7 @@ interface EvalResult {
   summary: string | null;
   score: number | null;
   humanScore: number | null;
-  evidenceJson?: string | null;
+  evidenceJson: string | null;
 }
 
 interface ExperimentCase {

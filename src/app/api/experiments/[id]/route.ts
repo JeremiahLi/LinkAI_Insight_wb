@@ -54,6 +54,7 @@ export async function GET(
 
   const allResults = experiment.cases.flatMap((c) =>
     c.results.map((r) => ({
+      caseId: c.id,
       evaluatorId: r.evaluatorId,
       status: r.status,
       score: r.score,

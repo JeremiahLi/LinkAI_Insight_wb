@@ -1,4 +1,5 @@
 export interface EvalResultRow {
+  caseId: string;
   evaluatorId: string;
   status: string;
   score: number | null;
@@ -44,15 +45,14 @@ export function aggregateScores(
     return { evaluatorId, averageScore: avg, scoredCount: rows.length };
   });
 
-  const cases = new Set(results.map((r) => r.evaluatorId));
-  const scoredCases = Array.from(cases).filter((evaluatorId) =>
-    results.some((r) => r.evaluatorId === evaluatorId && effectiveScore(r) !== null)
-  ).length;
+  // 按 caseId 统计（此前误把 evaluatorId 当作 case 去重）
+  const totalCases = new Set(results.map((r) => r.caseId)).size;
+  const scoredCases = new Set(scoredRows.map((r) => r.caseId)).size;
 
   return {
     overallAverage,
     evaluatorScores,
-    totalCases: results.length,
+    totalCases,
     scoredCases,
   };
 }

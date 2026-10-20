@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { Plus, Play, Eye, Loader2, FileText } from "lucide-react";
+import { Plus, Play, Eye, Loader2, FileText, GitCompareArrows } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -52,12 +52,20 @@ export default function ExperimentsPage() {
         title="评测中心"
         description="创建和管理 Agent 评测实验"
         actions={
-          <Link href="/experiments/new">
-            <Button size="sm">
-              <Plus className="h-3.5 w-3.5" />
-              新建实验
-            </Button>
-          </Link>
+          <span className="flex items-center gap-2">
+            <Link href="/experiments/compare">
+              <Button size="sm" variant="outline">
+                <GitCompareArrows className="h-3.5 w-3.5" />
+                实验对比
+              </Button>
+            </Link>
+            <Link href="/experiments/new">
+              <Button size="sm">
+                <Plus className="h-3.5 w-3.5" />
+                新建实验
+              </Button>
+            </Link>
+          </span>
         }
       />
 
