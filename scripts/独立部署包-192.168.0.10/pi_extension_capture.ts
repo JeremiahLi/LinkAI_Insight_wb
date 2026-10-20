@@ -15,7 +15,7 @@ function asInt(v, fallback) {
   return Number.isFinite(n) ? Math.trunc(n) : fallback
 }
 
-var SPOOL_DIR = process.env.PI_CAPTURE_SPOOL_DIR || path.join(os.homedir(), '.pi-capture')
+var SPOOL_DIR = process.env.PI_CAPTURE_SPOOL_DIR || path.join(os.homedir(), '.linkAI-capture')
 var USER_ID = process.env.PI_CAPTURE_USER || os.userInfo().username
 var MAX_STRING = asInt(process.env.PI_CAPTURE_MAX_STRING, 4000)
 var MAX_TOOL_IO = asInt(process.env.PI_CAPTURE_MAX_TOOL_IO, 4000)

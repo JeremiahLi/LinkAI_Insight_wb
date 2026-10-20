@@ -12,7 +12,7 @@ const LOCK_FILE = path.join(__dirname, '.uploader.lock');
 const CHECKPOINT_FILE = path.join(__dirname, 'uploader_checkpoint.json');
 
 // --scan-all 遍历的 spool 根目录，与捕获插件（pi_extension_capture.ts）保持一致
-const SPOOL_ROOT = process.env.PI_CAPTURE_SPOOL_DIR || path.join(os.homedir(), '.pi-capture');
+const SPOOL_ROOT = process.env.PI_CAPTURE_SPOOL_DIR || path.join(os.homedir(), '.linkAI-capture');
 
 // checkpoint 中文件级 stat 条目的保留键（sessionId 为 uuid，不可能叫这个名字）
 const FILE_STATS_KEY = '__files__';
