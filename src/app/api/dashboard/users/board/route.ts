@@ -33,8 +33,9 @@ export async function GET(request: Request) {
   }
 
   const spanDays = spanDaysOf(rangeParam ?? "all", range.startMs, firstSessionMs);
-  // 热力图列数：随窗口变化，最少 7 列（一周）最多 42 列（6 周，见 user-board HEATMAP_MAX_DAYS）
-  const heatmapDays = Math.min(Math.max(spanDays, 7), 42);
+  // 热力图列数：7 天窗口太窄（只有 7 格，看不出节奏），统一扩到两周起；
+  // 30 天档一列一天；全部档最多 6 周（见 user-board HEATMAP_MAX_DAYS）。
+  const heatmapDays = rangeParam === "weekly" ? 14 : Math.min(Math.max(spanDays, 7), 42);
 
   const board = await getUserBoard(prisma, { startMs: range.startMs, spanDays, heatmapDays });
   return NextResponse.json({ ...board, range: range.label, spanDays });

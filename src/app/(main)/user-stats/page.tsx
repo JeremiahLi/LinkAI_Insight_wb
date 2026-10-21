@@ -73,6 +73,7 @@ interface BoardData {
     avgSessions: number;
     prevAvgSessions: number | null;
     avgActiveDays: number;
+    activeAvgDays: number;
     roundsPerSession: number;
     errorSessions: number;
     errorRate: number;
@@ -116,8 +117,8 @@ function Delta({ cur, prev }: { cur: number; prev: number | null | undefined }) 
 function cellColor(n: number, max: number): string {
   if (n <= 0) return "var(--muted)";
   const ratio = Math.log1p(n) / Math.log1p(Math.max(max, 1));
-  const pct = ratio > 0.75 ? 100 : ratio > 0.5 ? 75 : ratio > 0.25 ? 52 : 30;
-  return `color-mix(in oklab, var(--primary) ${pct}%, transparent)`;
+  const pct = ratio > 0.75 ? 92 : ratio > 0.5 ? 70 : ratio > 0.25 ? 46 : 26;
+  return `color-mix(in oklab, var(--primary) ${pct}%, var(--card))`;
 }
 
 export default function UserBoardPage() {
@@ -170,15 +171,15 @@ export default function UserBoardPage() {
           sub={`在册 ${t.registered} 人 · 覆盖 ${coverage.toFixed(0)}%`}
         />
         <KpiCard
-          label="人均会话"
+          label="部门人均会话"
           value={t.avgSessions.toFixed(1)}
           sub={`合计 ${formatNumber(t.sessions)} 次`}
           trend={pctChange(t.avgSessions, t.prevAvgSessions)}
         />
         <KpiCard
-          label="人均使用天数"
+          label="部门人均使用天数"
           value={t.avgActiveDays.toFixed(1)}
-          sub={`人均 ${formatTokens(t.tokens / Math.max(t.activeUsers, 1))} Token`}
+          sub={`活跃成员人均 ${t.activeAvgDays.toFixed(1)} 天`}
         />
         <KpiCard
           label="未使用成员"
@@ -195,16 +196,16 @@ export default function UserBoardPage() {
             <div>
               <CardTitle>使用热度</CardTitle>
               <p className="mt-0.5 text-[11px] text-muted-foreground/80">
-                每人每日会话数 · 空白格表示当天没有使用
+                每人每日会话数 · 最近 {data.days.length} 天，空白格表示当天没有使用
               </p>
             </div>
             <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
               <span>少</span>
-              {[30, 52, 75, 100].map((p) => (
+              {[26, 46, 70, 92].map((p) => (
                 <span
                   key={p}
                   className="h-2.5 w-2.5 rounded-[2px]"
-                  style={{ backgroundColor: `color-mix(in oklab, var(--primary) ${p}%, transparent)` }}
+                  style={{ backgroundColor: `color-mix(in oklab, var(--primary) ${p}%, var(--card))` }}
                 />
               ))}
               <span>多</span>
@@ -226,7 +227,10 @@ export default function UserBoardPage() {
                     {u.daily.map((n, i) => (
                       <div
                         key={i}
-                        className="h-3.5 flex-1 rounded-[2px]"
+                        className={cn(
+                          "flex-1 rounded-[2px]",
+                          data.days.length <= 10 ? "h-5" : "h-3.5",
+                        )}
                         style={{ backgroundColor: cellColor(n, maxDaily) }}
                         title={`${data.days[i]} · ${n} 次`}
                       />
@@ -284,64 +288,96 @@ export default function UserBoardPage() {
         </Card>
       </div>
 
-      {/* 贡献卡位：Top 5，带 14 天走势 */}
-      {ranked.length > 0 && (
+      {/* 成员贡献卡位：含窗口内未使用成员，用灰态形成对比 */}
+      {data.users.length > 0 && (
         <div>
           <div className="mb-2 flex items-baseline justify-between">
-            <h2 className="text-[13px] font-medium">贡献排行</h2>
+            <h2 className="text-[13px] font-medium">成员贡献</h2>
             <span className="text-[11px] text-muted-foreground">
-              按会话数 · 走势为最近 14 天
+              按会话数 · 走势为最近 14 天 · 灰态为窗口内未使用
             </span>
           </div>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-5">
-            {ranked.slice(0, 5).map((u, i) => (
-              <Link key={u.name} href={`/user-stats/${encodeURIComponent(u.name)}`}>
-                <Card className="h-full transition-colors hover:bg-muted/30">
-                  <CardContent className="pt-3.5">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="truncate text-[13px] font-medium">{u.name}</p>
-                        <p className="truncate text-[11px] text-muted-foreground">
-                          {u.org || "未分组"}
-                        </p>
-                      </div>
-                      <span
-                        className={cn(
-                          "flex h-5 w-5 shrink-0 items-center justify-center rounded-full font-mono text-[11px] font-medium tabular-nums",
-                          i < 3
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-muted text-muted-foreground",
+          <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(190px,1fr))]">
+            {data.users.slice(0, 6).map((u) => {
+              const rank = ranked.findIndex((r) => r.name === u.name);
+              const idle = u.sessions === 0;
+              return (
+                <Link key={u.name} href={`/user-stats/${encodeURIComponent(u.name)}`}>
+                  <Card className="h-full transition-colors hover:bg-muted/30">
+                    <CardContent className="pt-3.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p
+                            className={cn(
+                              "truncate text-[13px] font-medium",
+                              idle && "text-muted-foreground",
+                            )}
+                          >
+                            {u.name}
+                          </p>
+                          <p className="truncate text-[11px] text-muted-foreground">
+                            {u.org || "未分组"}
+                          </p>
+                        </div>
+                        {rank >= 0 ? (
+                          <span
+                            className={cn(
+                              "flex h-5 w-5 shrink-0 items-center justify-center rounded-full font-mono text-[11px] font-medium tabular-nums",
+                              rank < 3
+                                ? "bg-primary text-primary-foreground"
+                                : "bg-muted text-muted-foreground",
+                            )}
+                          >
+                            {rank + 1}
+                          </span>
+                        ) : (
+                          <span className="flex h-5 w-5 shrink-0 items-center justify-center text-[11px] text-muted-foreground/40">
+                            —
+                          </span>
                         )}
-                      >
-                        {i + 1}
-                      </span>
-                    </div>
-                    <div className="mt-2.5 flex items-baseline gap-1.5">
-                      <span className="text-[26px] font-semibold leading-none tracking-tight tabular-nums">
-                        {u.sessions}
-                      </span>
-                      <span className="text-[11px] text-muted-foreground">次</span>
-                      <span className="ml-auto">
-                        <Delta cur={u.sessions} prev={u.prevSessions} />
-                      </span>
-                    </div>
-                    <div className="mt-2 flex items-end justify-between gap-2">
-                      <Sparkline data={u.recent} width={64} height={18} />
-                      <span className="text-[11px] tabular-nums text-muted-foreground">
-                        {u.activeDays} 天活跃
-                      </span>
-                    </div>
-                    <div className="mt-1.5 flex flex-wrap gap-x-2 text-[11px] text-muted-foreground">
-                      <span>{u.agentCount} 个 Agent</span>
-                      <span>{formatNumber(u.rounds)} 轮</span>
-                      {u.errorSessions > 0 && (
-                        <span className="text-destructive">{u.errorSessions} 异常</span>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              </Link>
-            ))}
+                      </div>
+                      <div className="mt-2.5 flex items-baseline gap-1.5">
+                        <span
+                          className={cn(
+                            "text-[26px] font-semibold leading-none tracking-tight tabular-nums",
+                            idle && "text-muted-foreground/60",
+                          )}
+                        >
+                          {u.sessions}
+                        </span>
+                        <span className="text-[11px] text-muted-foreground">次</span>
+                        <span className="ml-auto">
+                          <Delta cur={u.sessions} prev={u.prevSessions} />
+                        </span>
+                      </div>
+                      <div className="mt-2 flex items-end justify-between gap-2">
+                        <Sparkline data={u.recent} width={64} height={18} />
+                        <span className="text-[11px] tabular-nums text-muted-foreground">
+                          {idle
+                            ? u.lastActiveAt
+                              ? `${u.daysSinceActive} 天前活跃`
+                              : "从未使用"
+                            : `${u.activeDays} 天活跃`}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 flex min-h-[18px] flex-wrap gap-x-2 text-[11px] text-muted-foreground">
+                        {idle ? (
+                          <span className="text-muted-foreground/70">窗口内未使用</span>
+                        ) : (
+                          <>
+                            <span>{u.agentCount} 个 Agent</span>
+                            <span>{formatNumber(u.rounds)} 轮</span>
+                            {u.errorSessions > 0 && (
+                              <span className="text-destructive">{u.errorSessions} 异常</span>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                </Link>
+              );
+            })}
           </div>
         </div>
       )}

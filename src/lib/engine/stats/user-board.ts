@@ -250,9 +250,7 @@ export async function getUserBoard(
   const errorSessions = users.reduce((s, u) => s + u.errorSessions, 0);
   const activeDaySum = users.reduce((s, u) => s + u.activeDays, 0);
   const prevSessions = prevStartMs > 0 ? users.reduce((s, u) => s + (u.prevSessions ?? 0), 0) : null;
-  // 环比口径：上一窗口的活跃用户数需要单独算，用有 prevSessions 的人数近似会失真；
-  // 这里直接按「人均会话」算：本期人均 vs 上期人均（上期分母 = 上期有会话的人数）。
-  const prevActiveUsers = prevStartMs > 0 ? users.filter((u) => (u.prevSessions ?? 0) > 0).length : 0;
+  const registered = users.length;
   const idleNames = users.filter((u) => u.idle).map((u) => u.name);
 
   const tiers: Record<UserTier, string[]> = { high: [], mid: [], low: [], none: [] };
@@ -262,16 +260,16 @@ export async function getUserBoard(
     range: "",
     days,
     totals: {
-      registered: users.length,
+      registered,
       activeUsers,
       sessions,
       prevSessions,
       rounds,
       tokens,
-      avgSessions: activeUsers > 0 ? sessions / activeUsers : 0,
-      prevAvgSessions:
-        prevSessions !== null && prevActiveUsers > 0 ? prevSessions / prevActiveUsers : null,
-      avgActiveDays: activeUsers > 0 ? activeDaySum / activeUsers : 0,
+      avgSessions: registered > 0 ? sessions / registered : 0,
+      prevAvgSessions: prevSessions !== null && registered > 0 ? prevSessions / registered : null,
+      avgActiveDays: registered > 0 ? activeDaySum / registered : 0,
+      activeAvgDays: activeUsers > 0 ? activeDaySum / activeUsers : 0,
       roundsPerSession: sessions > 0 ? rounds / sessions : 0,
       errorSessions,
       errorRate: sessions > 0 ? (errorSessions / sessions) * 100 : 0,
