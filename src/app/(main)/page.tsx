@@ -105,6 +105,9 @@ export default function DashboardPage() {
   /** Agent 名称 -> 近 7 天逐日调用量 */
   const trendMap = new Map(trendSeries.map((s) => [s.name, s.data]));
 
+  /** 排行只展示有调用的 Agent（与性能看板「调用量对比」同口径） */
+  const rankedAgents = agentStats.filter((a) => a.calls > 0).slice(0, 5);
+
   // 点开详情：先展示已有统计，再异步补全 README（与性能看板点击行为一致）
   const openAgentDetail = (agent: SelectedAgent) => {
     setSelectedAgent(agent);
@@ -210,7 +213,7 @@ export default function DashboardPage() {
               <span className="text-right">近7天趋势</span>
             </div>
             <div className="divide-y divide-border/50">
-              {agentStats.slice(0, 5).map((agent, i) => (
+              {rankedAgents.map((agent, i) => (
                 <button
                   key={agent.id}
                   onClick={() => openAgentDetail(agent)}
@@ -224,7 +227,7 @@ export default function DashboardPage() {
                   </span>
                 </button>
               ))}
-              {agentStats.length === 0 && <EmptyRow colSpan={4} />}
+              {rankedAgents.length === 0 && <EmptyRow colSpan={4} />}
             </div>
           </CardContent>
         </Card>

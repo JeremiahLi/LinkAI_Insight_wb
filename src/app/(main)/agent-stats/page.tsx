@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader, SegmentedControl } from "@/components/shell/page-header";
 import { KpiCard } from "@/components/shell/kpi-card";
-import { formatDuration, formatNumber, rateColor } from "@/lib/format";
+import { formatDuration, formatNumber, formatTokens, rateColor } from "@/lib/format";
 import { RANGE_OPTIONS, type StatsRange } from "@/lib/engine/stats/range";
 import { AGENT_ERROR_RATE_THRESHOLD } from "@/lib/engine/stats/anomalies";
 import { FancyBarChartH } from "@/components/charts/fancy-bar-chart-h";
@@ -128,7 +128,11 @@ export default function AgentStatsPage() {
 
       {/* Stats：性能向指标，与概览仪表盘错位（概览负责活跃度，这里负责性能与健康） */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <KpiCard label="总调用次数" value={formatNumber(statsData.totalCalls)} sub={`${rangeLabel}累计`} />
+        <KpiCard
+          label="总调用次数"
+          value={formatNumber(statsData.totalCalls)}
+          sub={`${rangeLabel}累计 · 单次均 ${formatTokens(statsData.tokensPerCall)} Token`}
+        />
         <KpiCard
           label="平均耗时"
           value={statsData.avgDurationMs > 0 ? formatDuration(statsData.avgDurationMs) : "—"}
