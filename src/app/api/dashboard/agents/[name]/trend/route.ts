@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { resolveRange } from "@/lib/engine/stats/range";
 import { getAgentTrend, type TrendGranularity } from "@/lib/engine/stats/trend";
 
-const prisma = new PrismaClient();
 
 export async function GET(
   request: Request,

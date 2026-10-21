@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { resolveRange } from "@/lib/engine/stats/range";
 import { isAgentAnomalous } from "@/lib/engine/stats/anomalies";
 
-const prisma = new PrismaClient();
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);

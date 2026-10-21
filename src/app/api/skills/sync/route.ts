@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { readFileSync } from "fs";
 import { createHash } from "crypto";
 
-const prisma = new PrismaClient();
 
 export async function POST() {
   // 1. 获取所有 skill span 中提取的名称

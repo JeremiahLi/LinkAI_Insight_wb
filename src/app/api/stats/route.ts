@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { isAgentAnomalous } from "@/lib/engine/stats/anomalies";
 
-const prisma = new PrismaClient();
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -19,8 +18,18 @@ export async function GET(request: Request) {
     prevEndDate = startDate;
   } else if (range === "realtime") {
     startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    // 环比必须同口径：今日截至现在 vs 昨日同一时刻。原实现拿"昨日全天"做对照，
+    // 每天上午都会算出 50% 以上的假下降，触发并不存在的活跃度告警。
+    const elapsedMs = now.getTime() - startDate.getTime();
     prevStartDate = new Date(startDate.getTime() - 24 * 60 * 60 * 1000);
-    prevEndDate = startDate;
+    prevEndDate = new Date(prevStartDate.getTime() + elapsedMs);
+  } else if (range !== "all") {
+    // 3d / 30d 等档位本路由没有实现分桶与环比逻辑。原实现会静默落到"全量"分支，
+    // 返回口径完全不同的数据；这里直接拒绝，避免调用方拿到看似正常的错数据。
+    return NextResponse.json(
+      { error: `range=${range} 暂不支持，可用值：realtime / weekly / all` },
+      { status: 400 }
+    );
   }
 
   // 按 Span 活动时间统计活跃 Session

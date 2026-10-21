@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { aggregateScores } from "@/lib/engine/experiment/detail-agg";
 
-const prisma = new PrismaClient();
 
 // 与 judge-assembly.assembleContext 相同的取数规则：优先取 Session 中第一条非空 answer span。
 // 返回 hasRealOutput=false 表示 Session 里没有真实回答（LLM 调用失败 / 无录制），

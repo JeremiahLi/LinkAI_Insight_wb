@@ -1,11 +1,10 @@
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { getActiveLlmConfig, callLlmAsJson, type LlmConfig } from "./judge-llm";
 import { RULE_EVALUATORS } from "./rule-evaluators";
 import type { EvalOutput, EvaluatorContext, Evaluator, LlmEvaluator } from "./evaluator-types";
 
 export type { EvalOutput, EvaluatorContext, Evaluator, ToolCall, ContextStats } from "./evaluator-types";
 
-const prisma = new PrismaClient();
 
 /**
  * 无参考答案时对 LLM 评估结果降级：

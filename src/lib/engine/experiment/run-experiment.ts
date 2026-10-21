@@ -1,8 +1,62 @@
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { runEvaluator } from "./evaluators";
 import { assembleContext } from "./judge-assembly";
 
-const prisma = new PrismaClient();
+/** 判定"看似在跑、实际已死"的空闲阈值：结果表 10 分钟没有任何变更 */
+export const STALE_RUN_MS = 10 * 60 * 1000;
+
+export interface ReclaimResult {
+  /** 是否判定为中断并已回收 */
+  reset: boolean;
+  /** 最后一次结果更新的时间（存活信号） */
+  lastActivityAt: Date;
+  /** 被标记为 failed 的残留结果数 */
+  stuckResultCount: number;
+}
+
+/**
+ * 回收被中断的实验运行。
+ *
+ * runExperiment 是 fire-and-forget 启动的（route 里不 await），进程重启、
+ * dev HMR 重载模块、或崩溃都会让它悄悄消失，而 Experiment.status 会永远停在
+ * "running"；此时再点运行又被 `status === "running"` 拒绝 —— 实验永久卡死，
+ * 只能手工改库。
+ *
+ * 这里用结果表的最后更新时间做存活信号：超过 STALE_RUN_MS 仍无任何结果变更，
+ * 就判定为已中断，把残留的 pending/running 结果标记为 failed、实验置 failed，
+ * 使它可以被重新运行（runExperiment 只挑 pending/failed 的结果重跑）。
+ */
+export async function reclaimInterruptedRun(
+  experimentId: string,
+  experimentUpdatedAt: Date
+): Promise<ReclaimResult> {
+  const last = await prisma.experimentEvalResult.findFirst({
+    where: { experimentId },
+    orderBy: { updatedAt: "desc" },
+    select: { updatedAt: true },
+  });
+
+  const lastActivityAt = last?.updatedAt ?? experimentUpdatedAt;
+  if (Date.now() - lastActivityAt.getTime() < STALE_RUN_MS) {
+    return { reset: false, lastActivityAt, stuckResultCount: 0 };
+  }
+
+  const { count } = await prisma.experimentEvalResult.updateMany({
+    where: { experimentId, status: { in: ["pending", "running"] } },
+    data: {
+      status: "failed",
+      errorMessage: "运行被中断（进程重启或异常退出），已自动回收，可重新运行",
+    },
+  });
+
+  await prisma.experiment.update({
+    where: { id: experimentId },
+    data: { status: "failed" },
+  });
+
+  return { reset: true, lastActivityAt, stuckResultCount: count };
+}
+
 
 class Semaphore {
   private permits: number;

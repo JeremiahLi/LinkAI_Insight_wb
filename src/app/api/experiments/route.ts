@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { extractSessionData } from "@/lib/engine/experiment/session-data";
 
-const prisma = new PrismaClient();
 
 export async function GET() {
   const experiments = await prisma.experiment.findMany({

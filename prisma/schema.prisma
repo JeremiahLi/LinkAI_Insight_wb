@@ -78,6 +78,7 @@ model Session {
   @@index([userId, status, startTime])
   @@index([agentId, startTime])
   @@index([projectId, startTime])
+  @@index([startTime])
 }
 
 model Skill {
@@ -151,6 +152,9 @@ model Span {
   @@index([parentId])
   @@index([branchId])
   @@index([name, createdAt])
+  // 统计接口按 Span 活动时间跨会话过滤（/api/stats、/api/agents/stats、trend 等），
+  // 无单列索引时是全表扫；分桶循环里会重复扫，数据量上去后是主要瓶颈
+  @@index([createdAt])
 }
 
 model Experiment {

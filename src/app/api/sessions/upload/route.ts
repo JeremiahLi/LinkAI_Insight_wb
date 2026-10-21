@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 
-const prisma = new PrismaClient();
 
 export async function POST(request: Request) {
   let body: {
@@ -45,7 +44,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { sessionID, userId, projectId, startedAt, endedAt, model, rawData } = body;
+  // rawData（整包原始 payload）不再入库：全工程没有任何读取方，
+  // 而它会把每个会话的原始数据永久留在 Session 里（实测占库体 39%）。
+  // 字段仍保留在请求类型里，旧采集端继续携带也不会报错，服务端忽略。
+  const { sessionID, userId, projectId, startedAt, endedAt, model } = body;
 
   if (!sessionID || !userId || !projectId) {
     return NextResponse.json(
@@ -130,7 +132,6 @@ function toIntOr(v: unknown, fallback: number): number {
         status: "active",
         startTime: new Date(resolvedStartMs ?? Date.now()),
         endTime: endedAt ? new Date(endedAt) : new Date(),
-        rawData: rawData ?? null,
       },
     });
 

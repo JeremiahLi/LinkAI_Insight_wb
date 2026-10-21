@@ -48,6 +48,9 @@ Python/_cache/
 *.tsbuildinfo
 next-env.d.ts
 .tmp-shots/
-scripts/offline-server-pkg-win64/
+# 离线部署包体积大（4 万文件 / 1GB），已移出工程目录，此规则保留防误提交
 scripts/offline-server-pkg-win64/
 .next-*.log
+
+# 数据库与图标的本地备份（如 prisma/dev.db.bak-YYYYMMDD），不入库
+*.bak-*

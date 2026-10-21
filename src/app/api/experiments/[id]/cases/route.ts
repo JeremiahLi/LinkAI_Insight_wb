@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { extractSessionData } from "@/lib/engine/experiment/session-data";
 
-const prisma = new PrismaClient();
 
 // 向已有实验批量追加用例（session 抽样场景）
 // 不创建 ExperimentEvalResult：运行实验时会为缺失的 case×evaluator 自动补 pending 结果

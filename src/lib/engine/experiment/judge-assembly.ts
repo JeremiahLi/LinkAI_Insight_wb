@@ -1,7 +1,6 @@
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import type { EvaluatorContext, ToolCall, ContextStats } from "./evaluators";
 
-const prisma = new PrismaClient();
 
 export async function assembleContext(
   sessionId: string | null,
