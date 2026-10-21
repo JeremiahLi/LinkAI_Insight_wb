@@ -4,8 +4,9 @@ import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader, SegmentedControl } from "@/components/shell/page-header";
 import { KpiCard } from "@/components/shell/kpi-card";
-import { formatNumber } from "@/lib/format";
+import { formatDuration, formatNumber, rateColor } from "@/lib/format";
 import { RANGE_OPTIONS, type StatsRange } from "@/lib/engine/stats/range";
+import { AGENT_ERROR_RATE_THRESHOLD } from "@/lib/engine/stats/anomalies";
 import { FancyBarChartH } from "@/components/charts/fancy-bar-chart-h";
 import { MultiLineTrendChart } from "@/components/charts/multi-line-trend-chart";
 import { AgentDetailPanel } from "@/components/agent/agent-detail-panel";
@@ -24,11 +25,22 @@ interface AgentRow {
   successRate: number | null;
 }
 
+/** 异常 Agent 名单项（与概览异常预警同一口径） */
+interface ErrorAgentEntry {
+  name: string;
+  errors: number;
+  total: number;
+  errorRate: number;
+}
+
 interface StatsData {
   activeAgents: number;
   totalCalls: number;
   errorAgents: number;
+  errorAgentList: ErrorAgentEntry[];
   successRate: number;
+  avgDurationMs: number;
+  tokensPerCall: number;
   agents: AgentRow[];
 }
 
@@ -48,8 +60,9 @@ export default function AgentStatsPage() {
   const [timeRange, setTimeRange] = useState<StatsRange>("30d");
   const [granularity, setGranularity] = useState<Granularity>("day");
   const [selectedAgent, setSelectedAgent] = useState<SelectedAgent | null>(null);
-  const [statsData, setStatsData] = useState<StatsData>({ activeAgents: 0, totalCalls: 0, errorAgents: 0, successRate: 100, agents: [] });
+  const [statsData, setStatsData] = useState<StatsData>({ activeAgents: 0, totalCalls: 0, errorAgents: 0, errorAgentList: [], successRate: 100, avgDurationMs: 0, tokensPerCall: 0, agents: [] });
   const [trendData, setTrendData] = useState<TrendCompareData>({ labels: [], series: [] });
+  const [errorListOpen, setErrorListOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const rangeLabel = RANGE_OPTIONS.find((o) => o.value === timeRange)?.label ?? "";
@@ -80,7 +93,7 @@ export default function AgentStatsPage() {
         setTrendData({ labels: trend.labels ?? [], series: trend.series ?? [] });
       })
       .catch(() => {
-        setStatsData({ activeAgents: 0, totalCalls: 0, errorAgents: 0, successRate: 100, agents: [] });
+        setStatsData({ activeAgents: 0, totalCalls: 0, errorAgents: 0, errorAgentList: [], successRate: 100, avgDurationMs: 0, tokensPerCall: 0, agents: [] });
         setTrendData({ labels: [], series: [] });
       })
       .finally(() => setLoading(false));
@@ -113,18 +126,47 @@ export default function AgentStatsPage() {
         }
       />
 
-      {/* Stats */}
+      {/* Stats：性能向指标，与概览仪表盘错位（概览负责活跃度，这里负责性能与健康） */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <KpiCard label="活跃 Agent" value={String(statsData.activeAgents)} sub={`${rangeLabel}运行`} />
         <KpiCard label="总调用次数" value={formatNumber(statsData.totalCalls)} sub={`${rangeLabel}累计`} />
         <KpiCard
-          label="异常 Agent"
-          value={String(statsData.errorAgents)}
-          sub={statsData.errorAgents > 0 ? "需要关注" : "一切正常"}
-          subTone={statsData.errorAgents > 0 ? "warning" : "success"}
+          label="平均耗时"
+          value={statsData.avgDurationMs > 0 ? formatDuration(statsData.avgDurationMs) : "—"}
+          sub="Session 平均耗时"
         />
+        <div
+          onClick={statsData.errorAgents > 0 ? () => setErrorListOpen(!errorListOpen) : undefined}
+          className={statsData.errorAgents > 0 ? "cursor-pointer" : undefined}
+        >
+          <KpiCard
+            label="异常 Agent"
+            value={String(statsData.errorAgents)}
+            sub={statsData.errorAgents > 0 ? `错误率 > ${Math.round(AGENT_ERROR_RATE_THRESHOLD * 100)}%，点击${errorListOpen ? "收起" : "展开"}` : "一切正常"}
+            subTone={statsData.errorAgents > 0 ? "warning" : "success"}
+          />
+        </div>
         <KpiCard label="平均成功率" value={`${statsData.successRate}%`} sub="Session 成功比例" />
       </div>
+
+      {/* 异常 Agent 名单：与概览异常预警同一判定函数（lib/engine/stats/anomalies） */}
+      {errorListOpen && statsData.errorAgentList.length > 0 && (
+        <div className="rounded-lg px-4 py-3 ring-1 bg-destructive/5 ring-destructive/25">
+          <p className="text-[13px] font-medium">异常 Agent 名单</p>
+          <div className="mt-2 space-y-1.5 border-t border-border/60 pt-2">
+            {statsData.errorAgentList.map((a) => (
+              <div key={a.name} className="flex items-center justify-between gap-2 text-[13px]">
+                <span className="flex items-center gap-2">
+                  <span className="h-1.5 w-1.5 rounded-full bg-destructive" />
+                  {a.name}
+                </span>
+                <span className="font-mono text-xs tabular-nums text-muted-foreground">
+                  {a.errors}/{a.total} 错误 · <span className="text-destructive">{a.errorRate}%</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 调用量对比 + 使用趋势 */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -214,11 +256,4 @@ function AgentCard({ agent, onClick }: { agent: AgentRow; onClick: () => void })
       </div>
     </Card>
   );
-}
-
-function rateColor(rate: number | null) {
-  if (rate == null) return "text-muted-foreground";
-  if (rate >= 97) return "text-success";
-  if (rate >= 93) return "text-warning";
-  return "text-destructive";
 }

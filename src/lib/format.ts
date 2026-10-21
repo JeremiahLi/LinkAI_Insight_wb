@@ -35,6 +35,14 @@ export function formatRelativeTime(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString("zh-CN");
 }
 
+/** 成功率语义色：>=97 绿 / >=93 黄 / 其余红，null 灰 */
+export function rateColor(rate: number | null): string {
+  if (rate == null) return "text-muted-foreground";
+  if (rate >= 97) return "text-success";
+  if (rate >= 93) return "text-warning";
+  return "text-destructive";
+}
+
 export function formatDateTime(timestamp: number): string {
   const d = new Date(timestamp);
   const pad = (n: number) => String(n).padStart(2, "0");

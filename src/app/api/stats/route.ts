@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
+import { isAgentAnomalous } from "@/lib/engine/stats/anomalies";
 
 const prisma = new PrismaClient();
 
@@ -71,7 +72,7 @@ export async function GET(request: Request) {
       });
     }
 
-    // 2. Agent 错误率检测（错误率 > 30%）
+    // 2. Agent 错误率检测（口径见 lib/engine/stats/anomalies.ts，与性能看板共用）
     const agentErrorMap = new Map<string, { total: number; errors: number }>();
     currentStats.sessions.forEach((s) => {
       const existing = agentErrorMap.get(s.agentId) || { total: 0, errors: 0 };
@@ -81,7 +82,7 @@ export async function GET(request: Request) {
     });
     const agentErrorDetails: { agentName: string; errorRate: number }[] = [];
     for (const [agentId, data] of agentErrorMap) {
-      if (data.total >= 2 && data.errors / data.total > 0.3) {
+      if (isAgentAnomalous(data)) {
         const rate = Math.round((data.errors / data.total) * 100);
         const agent = await prisma.agent.findUnique({ where: { id: agentId }, select: { name: true } });
         agentErrorDetails.push({ agentName: agent?.name ?? agentId.slice(-6), errorRate: rate });

@@ -7,6 +7,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader, SegmentedControl } from "@/components/shell/page-header";
 import { KpiCard } from "@/components/shell/kpi-card";
 import { formatNumber, formatTokens } from "@/lib/format";
+import { OVERVIEW_RANGE_OPTIONS, type StatsRange } from "@/lib/engine/stats/range";
+import { Sparkline } from "@/components/charts/sparkline";
+import { AgentDetailPanel } from "@/components/agent/agent-detail-panel";
 import { useChartColors } from "@/lib/use-chart-colors";
 import {
   Area,
@@ -42,7 +45,19 @@ interface TopSession {
   startTime: string;
 }
 
-type TimeRange = "realtime" | "weekly";
+type TimeRange = Extract<StatsRange, "realtime" | "weekly">;
+
+/** 概览排行行点开的 Agent（详情面板所需的最小字段集） */
+interface SelectedAgent {
+  id: string;
+  name: string;
+  emoji: string;
+  description: string;
+  framework: string;
+  version: string;
+  calls: number;
+  successRate: number | null;
+}
 
 /** 列表行共用的等宽右对齐数字样式 */
 const numCell = "font-mono text-[13px] tabular-nums text-right";
@@ -54,10 +69,13 @@ export default function DashboardPage() {
   const [allStats, setAllStats] = useState<RealStats | null>(null);
   const [topSessions, setTopSessions] = useState<TopSession[]>([]);
   const [skillStats, setSkillStats] = useState<{ total: number; prevTotal: number }>({ total: 0, prevTotal: 0 });
-  const [agentStats, setAgentStats] = useState<{ id: string; name: string; emoji: string; calls: number; successRate: number | null }[]>([]);
+  const [agentStats, setAgentStats] = useState<SelectedAgent[]>([]);
   const [skillStatsList, setSkillStatsList] = useState<{ name: string; calls: number }[]>([]);
+  /** 近 7 天逐日调用量（固定窗口，与上方时间切换解耦，供 sparkline 使用） */
+  const [trendSeries, setTrendSeries] = useState<{ name: string; data: number[] }[]>([]);
   const [statsLoading, setStatsLoading] = useState(true);
   const [alertsExpanded, setAlertsExpanded] = useState(true);
+  const [selectedAgent, setSelectedAgent] = useState<SelectedAgent | null>(null);
   const colors = useChartColors();
 
   useEffect(() => {
@@ -68,18 +86,37 @@ export default function DashboardPage() {
       fetch(`/api/sessions/top?range=${timeRange}`).then((r) => r.json()),
       fetch(`/api/skills/stats?range=${timeRange}`).then((r) => r.json()),
       fetch(`/api/agents/stats?range=${timeRange}`).then((r) => r.json()),
+      // sparkline 固定取近 7 天逐日趋势，不随时间切换抖动
+      fetch("/api/dashboard/agents/trend-compare?range=weekly&granularity=day&topN=30").then((r) => r.json()),
     ])
-      .then(([rangeData, allData, topData, skillData, agentData]: [RealStats, RealStats, TopSession[], { total: number; prevTotal: number; skills: { name: string; calls: number }[] }, { agents: { id: string; name: string; emoji: string; calls: number; successRate: number | null }[] }]) => {
+      .then(([rangeData, allData, topData, skillData, agentData, trendData]: [RealStats, RealStats, TopSession[], { total: number; prevTotal: number; skills: { name: string; calls: number }[] }, { agents: SelectedAgent[] }, { series: { name: string; data: number[] }[] }]) => {
         setRealStats(rangeData);
         setAllStats(allData);
         setTopSessions(topData);
         setSkillStats({ total: skillData.total, prevTotal: skillData.prevTotal });
         setSkillStatsList(skillData.skills ?? []);
         setAgentStats(agentData.agents ?? []);
+        setTrendSeries(trendData.series ?? []);
         setStatsLoading(false);
       })
       .catch(() => setStatsLoading(false));
   }, [timeRange]);
+
+  /** Agent 名称 -> 近 7 天逐日调用量 */
+  const trendMap = new Map(trendSeries.map((s) => [s.name, s.data]));
+
+  // 点开详情：先展示已有统计，再异步补全 README（与性能看板点击行为一致）
+  const openAgentDetail = (agent: SelectedAgent) => {
+    setSelectedAgent(agent);
+    fetch(`/api/agents/${encodeURIComponent(agent.name)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        setSelectedAgent((prev) =>
+          prev && prev.id === agent.id ? { ...prev, readme: data.readme || "" } : prev,
+        );
+      })
+      .catch(() => {});
+  };
 
   if (statsLoading || !realStats || !allStats) {
     return (
@@ -112,10 +149,7 @@ export default function DashboardPage() {
         description={isRealtime ? "实时运行状态监控" : "Agent 市场近 7 天运行情况"}
         actions={
           <SegmentedControl
-            options={[
-              { value: "realtime", label: "今日" },
-              { value: "weekly", label: "近 7 天" },
-            ]}
+            options={OVERVIEW_RANGE_OPTIONS}
             value={timeRange}
             onChange={setTimeRange}
           />
@@ -160,35 +194,40 @@ export default function DashboardPage() {
 
       {/* 主区域：Agent / Skill / Session 三列排行 */}
       <div className="grid gap-4 lg:grid-cols-3">
-        {/* Agent 排行 */}
-        <Link href="/agent-stats" className="block">
-          <Card className="h-full cursor-pointer transition-colors hover:ring-foreground/25">
-            <CardHeader className="border-b border-border/60 pb-2.5">
-              <CardTitle>Agent 调用排行</CardTitle>
-            </CardHeader>
-            <CardContent className="pt-3">
-              <div className="grid grid-cols-[16px_1fr_44px_48px] gap-x-2 pb-1.5 text-[11px] font-medium text-muted-foreground">
-                <span />
-                <span>名称</span>
-                <span className="text-right">调用</span>
-                <span className="text-right">成功率</span>
-              </div>
-              <div className="divide-y divide-border/50">
-                {agentStats.slice(0, 5).map((agent, i) => (
-                  <div key={agent.id} className="grid h-8 grid-cols-[16px_1fr_44px_48px] items-center gap-x-2">
-                    <span className="font-mono text-xs text-muted-foreground/60 tabular-nums">{i + 1}</span>
-                    <span className="truncate text-[13px]">{agent.name}</span>
-                    <span className={numCell}>{formatNumber(agent.calls)}</span>
-                    <span className={`${numCell} ${rateColor(agent.successRate)}`}>
-                      {agent.successRate != null ? `${agent.successRate}%` : "—"}
-                    </span>
-                  </div>
-                ))}
-                {agentStats.length === 0 && <EmptyRow colSpan={4} />}
-              </div>
-            </CardContent>
-          </Card>
-        </Link>
+        {/* Agent 排行：行内 sparkline 展示近 7 天趋势，点击行直接下钻单 Agent 详情 */}
+        <Card className="h-full">
+          <CardHeader className="flex-row items-center justify-between border-b border-border/60 pb-2.5">
+            <CardTitle>Agent 调用排行</CardTitle>
+            <Link href="/agent-stats" className="text-xs text-muted-foreground transition-colors hover:text-foreground">
+              全部 →
+            </Link>
+          </CardHeader>
+          <CardContent className="pt-3">
+            <div className="grid grid-cols-[16px_1fr_44px_80px] gap-x-2 pb-1.5 text-[11px] font-medium text-muted-foreground">
+              <span />
+              <span>名称</span>
+              <span className="text-right">调用</span>
+              <span className="text-right">近7天趋势</span>
+            </div>
+            <div className="divide-y divide-border/50">
+              {agentStats.slice(0, 5).map((agent, i) => (
+                <button
+                  key={agent.id}
+                  onClick={() => openAgentDetail(agent)}
+                  className="grid h-8 w-full grid-cols-[16px_1fr_44px_80px] items-center gap-x-2 text-left transition-colors hover:bg-muted/40"
+                >
+                  <span className="font-mono text-xs text-muted-foreground/60 tabular-nums">{i + 1}</span>
+                  <span className="truncate text-[13px]">{agent.name}</span>
+                  <span className={numCell}>{formatNumber(agent.calls)}</span>
+                  <span className="flex justify-end">
+                    <Sparkline data={trendMap.get(agent.name) ?? []} />
+                  </span>
+                </button>
+              ))}
+              {agentStats.length === 0 && <EmptyRow colSpan={4} />}
+            </div>
+          </CardContent>
+        </Card>
 
         {/* Skill 排行 */}
         <Link href="/skill-stats" className="block">
@@ -277,15 +316,16 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* 单 Agent 详情面板：从排行行直接下钻 */}
+      <AgentDetailPanel
+        agent={selectedAgent ? { ...selectedAgent, readme: "" } : null}
+        open={selectedAgent !== null}
+        onClose={() => setSelectedAgent(null)}
+        timeRange={timeRange}
+      />
     </div>
   );
-}
-
-function rateColor(rate: number | null) {
-  if (rate == null) return "text-muted-foreground";
-  if (rate >= 97) return "text-success";
-  if (rate >= 93) return "text-warning";
-  return "text-destructive";
 }
 
 function EmptyRow({ colSpan }: { colSpan: number }) {

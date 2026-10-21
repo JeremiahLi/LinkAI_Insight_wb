@@ -9,7 +9,9 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const range = resolveRange(searchParams.get("range"));
   const granularity: TrendGranularity = searchParams.get("granularity") === "week" ? "week" : "day";
+  const topNParam = Number(searchParams.get("topN"));
+  const topN = Number.isFinite(topNParam) && topNParam > 0 ? topNParam : 8;
 
-  const compare = await getAgentsTrendCompare(prisma, range.startMs, granularity);
+  const compare = await getAgentsTrendCompare(prisma, range.startMs, granularity, topN);
   return NextResponse.json({ range: range.label, granularity, ...compare });
 }

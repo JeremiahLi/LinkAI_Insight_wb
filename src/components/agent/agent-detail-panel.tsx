@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { SlidePanel } from "@/components/trace/slide-panel";
 import { formatNumber, formatRelativeTime } from "@/lib/format";
 import { UsageTrendChart, type TrendPointDto } from "@/components/charts/usage-trend-chart";
+import { RANGED_OPTIONS, type StatsRange } from "@/lib/engine/stats/range";
 import { useState, useEffect } from "react";
 
 interface AgentDetailData {
@@ -28,15 +29,8 @@ interface UsageData {
   total: number;
 }
 
-type DetailRange = "realtime" | "3d" | "weekly" | "30d";
+type DetailRange = Exclude<StatsRange, "all">;
 type Granularity = "day" | "week";
-
-const DETAIL_RANGE_OPTIONS: { value: DetailRange; label: string }[] = [
-  { value: "realtime", label: "今日" },
-  { value: "3d", label: "近3天" },
-  { value: "weekly", label: "近7天" },
-  { value: "30d", label: "近30天" },
-];
 
 interface Props {
   agent: AgentDetailData | null;
@@ -143,7 +137,7 @@ export function AgentDetailPanel({ agent, open, onClose, timeRange }: Props) {
               <div className="flex items-center justify-between mb-3">
                 <p className="text-sm font-medium">使用情况统计</p>
                 <div className="flex items-center gap-1 rounded-md bg-muted/50 p-0.5">
-                  {DETAIL_RANGE_OPTIONS.map((opt) => (
+                  {RANGED_OPTIONS.map((opt) => (
                     <button
                       key={opt.value}
                       className={`h-6 px-2 text-xs font-medium rounded transition-colors ${
