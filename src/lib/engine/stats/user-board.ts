@@ -58,12 +58,14 @@ export interface UserBoardTotals {
   prevSessions: number | null;
   rounds: number;
   tokens: number;
-  /** 人均会话数（以活跃用户为分母） */
+  /** 部门人均会话数（分母为在册人数，不受活跃人数波动影响） */
   avgSessions: number;
-  /** 上一窗口人均会话数 */
+  /** 上一窗口的部门人均会话数 */
   prevAvgSessions: number | null;
-  /** 人均活跃天数 */
+  /** 部门人均使用天数（分母为在册人数） */
   avgActiveDays: number;
+  /** 活跃成员人均使用天数（分母为有使用的成员） */
+  activeAvgDays: number;
   /** 人均轮数（单会话深度） */
   roundsPerSession: number;
   errorSessions: number;
