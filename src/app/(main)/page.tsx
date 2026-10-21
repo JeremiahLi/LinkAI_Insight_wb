@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
-import { AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
+import { AlertTriangle, Bot, ChevronDown, ChevronUp, Coins, MessageSquare, Users } from "lucide-react";
 import { PageHeader, SegmentedControl } from "@/components/shell/page-header";
 import { Card, CardContent } from "@/components/ui/card";
+import { BarGradient, MetricTrendCard } from "@/components/charts/metric-trend-card";
 import { formatNumber, formatTokens } from "@/lib/format";
-import { useChartColors, useCategoryPalette } from "@/lib/use-chart-colors";
+import { useChartColors, useMetricAccents } from "@/lib/use-chart-colors";
 import {
   Area,
   AreaChart,
@@ -18,7 +19,6 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  ResponsiveContainer,
 } from "recharts";
 
 /**
@@ -33,6 +33,8 @@ const TREND_RANGE_OPTIONS: { value: TrendRange; label: string }[] = [
   { value: "30d", label: "近30天" },
   { value: "all", label: "全部" },
 ];
+
+/** Token 三段用同色相梯度区分，避免和会话图抢蓝紫两个色相 */
 
 interface OverviewPoint {
   label: string;
@@ -119,52 +121,6 @@ function TrendText({ percent, direction }: { percent: number | null; direction: 
   );
 }
 
-/** 柱状渐变填充：上端实、下端淡，制造体量感 */
-function BarGradient({ id, color, from = 0.95, to = 0.55 }: { id: string; color: string; from?: number; to?: number }) {
-  return (
-    <defs>
-      <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stopColor={color} stopOpacity={from} />
-        <stop offset="100%" stopColor={color} stopOpacity={to} />
-      </linearGradient>
-    </defs>
-  );
-}
-
-/** 趋势卡容器：标题 + 右上锚点 + 口径说明 + 图表区 */
-function TrendCard({
-  title,
-  caliber,
-  anchor,
-  anchorTrend,
-  height = 220,
-  children,
-}: {
-  title: string;
-  caliber: string;
-  anchor: ReactNode;
-  anchorTrend?: { percent: number | null; direction: "up" | "down" | "flat" };
-  height?: number;
-  children: ReactNode;
-}) {
-  return (
-    <Card>
-      <CardContent className="pt-4">
-        <div className="flex items-baseline justify-between gap-2">
-          <h3 className="text-[13px] font-medium">{title}</h3>
-          <div className="flex items-baseline gap-1.5 text-muted-foreground">{anchor}{anchorTrend && <TrendText percent={anchorTrend.percent} direction={anchorTrend.direction} />}</div>
-        </div>
-        <p className="mb-2 mt-0.5 text-[11px] text-muted-foreground/80">{caliber}</p>
-        <div style={{ height }}>
-          <ResponsiveContainer width="100%" height="100%">
-            {children as React.ReactElement}
-          </ResponsiveContainer>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
 export default function DashboardPage() {
   const [range, setRange] = useState<TrendRange>("weekly");
   const [overview, setOverview] = useState<OverviewData | null>(null);
@@ -178,7 +134,9 @@ export default function DashboardPage() {
     return () => clearInterval(timer);
   }, []);
   const colors = useChartColors();
-  const palette = useCategoryPalette();
+  const accents = useMetricAccents();
+  // Token 三段：输入最突出，cache 最淡（浅色下最深→最浅，深色下最亮→最暗）
+  const tokenRamp = accents.tokens.ramp ?? [accents.tokens.solid, accents.tokens.solid, accents.tokens.solid];
 
   // 异常哨兵固定取实时档，不随趋势范围切换
   useEffect(() => {
@@ -211,7 +169,7 @@ export default function DashboardPage() {
         </div>
         <div className="grid gap-4 lg:grid-cols-2">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="h-[276px] animate-pulse rounded-xl bg-card shadow-card ring-1 ring-foreground/5" />
+            <div key={i} className="h-[300px] animate-pulse rounded-xl bg-card shadow-card ring-1 ring-foreground/5" />
           ))}
         </div>
       </div>
@@ -311,9 +269,16 @@ export default function DashboardPage() {
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
           {/* 用户趋势：活跃用户 + 累计注册 */}
-          <TrendCard
+          <MetricTrendCard
             title="用户趋势"
-            caliber="每日活跃用户（实线）· 累计注册用户（虚线）"
+            unit="人"
+            icon={Users}
+            accent={accents.users}
+            caliber="每日活跃 · 累计注册"
+            legend={[
+              { label: "活跃用户", color: accents.users.solid, kind: "line" },
+              { label: "累计注册", color: colors.neutralLine, kind: "line-dashed" },
+            ]}
             anchor={
               last && (
                 <>
@@ -322,61 +287,77 @@ export default function DashboardPage() {
                 </>
               )
             }
-            anchorTrend={calcTrend(last?.activeUsers ?? 0, prev?.activeUsers)}
+            trend={<TrendText {...calcTrend(last?.activeUsers ?? 0, prev?.activeUsers)} />}
           >
             <LineChart data={series} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
               <CartesianGrid stroke={colors.grid} vertical={false} />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={36} allowDecimals={false} />
+              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={44} allowDecimals={false} />
               <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} />
-              <Line type="monotone" dataKey="activeUsers" name="活跃用户" stroke={palette[0]} strokeWidth={2} dot={false} activeDot={{ r: 3 }} />
-              <Line type="monotone" dataKey="cumulativeUsers" name="累计注册" stroke={palette[1]} strokeWidth={1.5} strokeDasharray="5 3" dot={false} />
+              <Line type="monotone" dataKey="activeUsers" name="活跃用户" stroke={accents.users.solid} strokeWidth={2} dot={false} activeDot={{ r: 3 }} />
+              <Line type="monotone" dataKey="cumulativeUsers" name="累计注册" stroke={colors.neutralLine} strokeWidth={1.5} strokeDasharray="5 3" dot={false} />
             </LineChart>
-          </TrendCard>
+          </MetricTrendCard>
 
           {/* 会话量趋势：新增会话 + 失败叠红 */}
-          <TrendCard
+          <MetricTrendCard
             title="会话量趋势"
-            caliber="每日新增会话（蓝）· 其中失败会话（红，堆叠）"
+            unit="次"
+            icon={MessageSquare}
+            accent={accents.sessions}
+            caliber="每日新增会话 · 其中失败会话堆叠"
+            legend={[
+              { label: "正常会话", color: accents.sessions.solid, kind: "bar" },
+              { label: "失败会话", color: "var(--destructive)", kind: "bar" },
+            ]}
             anchor={last && <span className="text-xs">今日新增 {anchorNum(last.sessions)}</span>}
-            anchorTrend={calcTrend(last?.sessions ?? 0, prev?.sessions)}
+            trend={<TrendText {...calcTrend(last?.sessions ?? 0, prev?.sessions)} />}
           >
             <BarChart data={chartSeries} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
-              <BarGradient id="overviewSessions" color={palette[0]} />
+              <BarGradient id="overviewSessions" color={accents.sessions.solid} />
               <CartesianGrid stroke={colors.grid} vertical={false} />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={36} allowDecimals={false} />
+              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={44} allowDecimals={false} />
               <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} cursor={{ fill: colors.grid, opacity: 0.35 }} />
               <Bar dataKey="okSessions" name="正常会话" stackId="s" fill="url(#overviewSessions)" />
-              <Bar dataKey="errorSessions" name="失败会话" stackId="s" fill={palette[4]} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="errorSessions" name="失败会话" stackId="s" fill="var(--destructive)" radius={[4, 4, 0, 0]} />
             </BarChart>
-          </TrendCard>
+          </MetricTrendCard>
 
           {/* Token 消耗趋势：输入/输出/cache 三段堆叠 */}
-          <TrendCard
+          <MetricTrendCard
             title="Token 消耗趋势"
+            unit="tokens"
+            icon={Coins}
+            accent={accents.tokens}
             caliber="每日消耗按 输入 / 输出 / cache 堆叠"
-            anchor={last && <span className="text-xs">今日消耗 <span className="text-sm font-medium text-foreground tabular-nums">{formatTokens(last.totalTokens)}</span></span>}
-            anchorTrend={calcTrend(last?.totalTokens ?? 0, prev?.totalTokens)}
+            legend={[
+              { label: "输入", color: tokenRamp[0], kind: "bar" },
+              { label: "输出", color: tokenRamp[1], kind: "bar" },
+              { label: "cache", color: tokenRamp[2], kind: "bar" },
+            ]}
+            anchor={last && <span className="text-xs">今日消耗 {anchorNum(last.totalTokens)}</span>}
+            trend={<TrendText {...calcTrend(last?.totalTokens ?? 0, prev?.totalTokens)} />}
           >
             <BarChart data={series} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
-              <BarGradient id="overviewTokIn" color={palette[0]} />
-              <BarGradient id="overviewTokOut" color={palette[2]} />
-              <BarGradient id="overviewTokCache" color={palette[1]} />
               <CartesianGrid stroke={colors.grid} vertical={false} />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={48} tickFormatter={(v) => formatTokens(Number(v))} />
+              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={44} tickFormatter={(v) => formatTokens(Number(v))} />
               <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} formatter={(v) => formatTokens(Number(v))} cursor={{ fill: colors.grid, opacity: 0.35 }} />
-              <Bar dataKey="inputTokens" name="输入" stackId="t" fill="url(#overviewTokIn)" />
-              <Bar dataKey="outputTokens" name="输出" stackId="t" fill="url(#overviewTokOut)" />
-              <Bar dataKey="cacheTokens" name="Cache" stackId="t" fill="url(#overviewTokCache)" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="inputTokens" name="输入" stackId="t" fill={tokenRamp[0]} />
+              <Bar dataKey="outputTokens" name="输出" stackId="t" fill={tokenRamp[1]} />
+              <Bar dataKey="cacheTokens" name="cache" stackId="t" fill={tokenRamp[2]} radius={[4, 4, 0, 0]} />
             </BarChart>
-          </TrendCard>
+          </MetricTrendCard>
 
           {/* 活跃 Agent 趋势 */}
-          <TrendCard
+          <MetricTrendCard
             title="活跃 Agent 趋势"
+            unit="个"
+            icon={Bot}
+            accent={accents.agents}
             caliber="每日有调用的 Agent 数（去重）"
+            legend={[{ label: "活跃 Agent", color: accents.agents.solid, kind: "area" }]}
             anchor={
               last && (
                 <>
@@ -385,22 +366,22 @@ export default function DashboardPage() {
                 </>
               )
             }
-            anchorTrend={calcTrend(last?.activeAgents ?? 0, prev?.activeAgents)}
+            trend={<TrendText {...calcTrend(last?.activeAgents ?? 0, prev?.activeAgents)} />}
           >
             <AreaChart data={series} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
               <defs>
                 <linearGradient id="overviewAgentGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={colors.areaStroke} stopOpacity={0.25} />
-                  <stop offset="100%" stopColor={colors.areaStroke} stopOpacity={0} />
+                  <stop offset="0%" stopColor={accents.agents.solid} stopOpacity={0.25} />
+                  <stop offset="100%" stopColor={accents.agents.solid} stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid stroke={colors.grid} vertical={false} />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={36} allowDecimals={false} />
+              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={44} allowDecimals={false} />
               <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} />
-              <Area type="monotone" dataKey="activeAgents" name="活跃 Agent" stroke={colors.areaStroke} fill="url(#overviewAgentGradient)" strokeWidth={2} />
+              <Area type="monotone" dataKey="activeAgents" name="活跃 Agent" stroke={accents.agents.solid} fill="url(#overviewAgentGradient)" strokeWidth={2} />
             </AreaChart>
-          </TrendCard>
+          </MetricTrendCard>
         </div>
       )}
 
