@@ -18,7 +18,7 @@ export function useIsDark() {
 
 const LIGHT_COLORS = {
   text: "oklch(0.18 0.02 260)",
-  grid: "oklch(0.91 0.008 260)",
+  grid: "oklch(0.91 0.008 260 / 65%)",
   areaStroke: "oklch(0.45 0.12 250)",
   areaFill: "oklch(0.45 0.12 250 / 25%)",
   bars: [

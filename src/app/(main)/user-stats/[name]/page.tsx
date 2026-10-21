@@ -98,7 +98,7 @@ export default function UserDrilldownPage() {
       <div className="flex h-[calc(100vh-56px)] flex-col items-center justify-center gap-3">
         <p className="text-sm text-muted-foreground">用户未找到: {userName}</p>
         <Button variant="outline" size="sm" onClick={() => router.push("/user-stats")}>
-          返回用户列表
+          返回用户看板
         </Button>
       </div>
     );

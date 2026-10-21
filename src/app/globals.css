@@ -55,7 +55,8 @@
 }
 
 :root {
-  --background: oklch(0.99 0.002 250);
+  /* 背景比卡片深一档，让白色卡片自然浮起（浅色高级感的核心） */
+  --background: oklch(0.972 0.005 260);
   --foreground: oklch(0.18 0.02 260);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.18 0.02 260);
@@ -80,6 +81,8 @@
   --border: oklch(0.92 0.005 260);
   --input: oklch(0.91 0.008 260);
   --ring: oklch(0.52 0.17 275);
+  /* 品牌渐变（紫→蓝青）：用于激活指示条、KPI 数字、logo 光环等点缀 */
+  --gradient-brand: linear-gradient(135deg, oklch(0.52 0.19 275), oklch(0.58 0.16 230));
   --chart-1: oklch(0.58 0.2 270);
   --chart-2: oklch(0.6 0.15 200);
   --chart-3: oklch(0.65 0.17 155);
@@ -122,6 +125,7 @@
 .dark {
   /* Dark-first: GitHub Dark 配色（与 Agent Session Trace Viewer 一致） */
   --background: #0d1117;
+  --gradient-brand: linear-gradient(135deg, oklch(0.72 0.14 275), oklch(0.75 0.11 230));
   --foreground: #e6edf3;
   --card: #161b22;
   --card-foreground: #e6edf3;
@@ -215,6 +219,36 @@
 }
 
 @layer utilities {
+  /* 主内容区光晕底色：极淡品牌色径向渐变，浅色下若隐若现（固定于视口，不随滚动） */
+  .bg-aurora {
+    background-image:
+      radial-gradient(42rem 26rem at 85% -8%, oklch(0.6 0.14 275 / 0.07), transparent 65%),
+      radial-gradient(38rem 24rem at -10% 30%, oklch(0.62 0.12 230 / 0.06), transparent 65%),
+      radial-gradient(30rem 22rem at 60% 110%, oklch(0.62 0.12 200 / 0.05), transparent 65%);
+    background-attachment: fixed;
+  }
+  /* 品牌渐变文字（KPI 大数字等） */
+  .text-gradient-brand {
+    background-image: var(--gradient-brand);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  /* 品牌渐变色块（指示条等） */
+  .bg-brand-gradient {
+    background-image: var(--gradient-brand);
+  }
+  /* 卡片双层柔和阴影：近距贴边阴影 + 远距弥散投影 */
+  .shadow-card {
+    box-shadow:
+      0 1px 2px rgb(24 20 48 / 0.04),
+      0 8px 24px -12px rgb(30 20 60 / 0.12);
+  }
+  .shadow-card-hover {
+    box-shadow:
+      0 1px 2px rgb(24 20 48 / 0.05),
+      0 14px 32px -12px rgb(30 20 60 / 0.18);
+  }
   @keyframes slide-in-right {
     from { transform: translateX(100%); }
     to { transform: translateX(0); }

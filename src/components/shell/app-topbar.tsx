@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
  */
 export function AppTopbar() {
   return (
-    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border px-6">
+    <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border/70 bg-background/60 px-6 backdrop-blur-md">
       <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
         <span className="relative flex h-1.5 w-1.5">
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />

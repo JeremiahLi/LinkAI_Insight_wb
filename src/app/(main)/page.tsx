@@ -119,6 +119,18 @@ function TrendText({ percent, direction }: { percent: number | null; direction: 
   );
 }
 
+/** 柱状渐变填充：上端实、下端淡，制造体量感 */
+function BarGradient({ id, color, from = 0.95, to = 0.55 }: { id: string; color: string; from?: number; to?: number }) {
+  return (
+    <defs>
+      <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor={color} stopOpacity={from} />
+        <stop offset="100%" stopColor={color} stopOpacity={to} />
+      </linearGradient>
+    </defs>
+  );
+}
+
 /** 趋势卡容器：标题 + 右上锚点 + 口径说明 + 图表区 */
 function TrendCard({
   title,
@@ -189,8 +201,19 @@ export default function DashboardPage() {
 
   if (loading || !overview) {
     return (
-      <div className="flex h-[calc(100vh-56px)] items-center justify-center">
-        <p className="text-sm text-muted-foreground">加载中...</p>
+      <div className="flex flex-col gap-5 p-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-2">
+            <div className="h-5 w-40 animate-pulse rounded-md bg-muted" />
+            <div className="h-3.5 w-64 animate-pulse rounded bg-muted" />
+          </div>
+          <div className="h-7 w-44 animate-pulse rounded-md bg-muted" />
+        </div>
+        <div className="grid gap-4 lg:grid-cols-2">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="h-[276px] animate-pulse rounded-xl bg-card shadow-card ring-1 ring-foreground/5" />
+          ))}
+        </div>
       </div>
     );
   }
@@ -212,13 +235,14 @@ export default function DashboardPage() {
   const tooltipStyle = {
     backgroundColor: "var(--popover)",
     border: "1px solid var(--border)",
-    borderRadius: 6,
+    borderRadius: 8,
     fontSize: 12,
     color: colors.text,
+    boxShadow: "0 8px 24px -8px rgb(30 20 60 / 0.18)",
   } as const;
 
   return (
-    <div className="flex flex-col gap-5 p-6">
+    <div className="flex animate-in flex-col gap-5 p-6 duration-300 fade-in slide-in-from-bottom-2">
       <PageHeader
         title="概览"
         description="平台全局运行趋势 · 单点数据仅作图上锚点"
@@ -305,8 +329,8 @@ export default function DashboardPage() {
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
               <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={36} allowDecimals={false} />
               <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} />
-              <Line type="monotone" dataKey="activeUsers" name="活跃用户" stroke={colors.areaStroke} strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="cumulativeUsers" name="累计注册" stroke={palette[4]} strokeWidth={1.5} strokeDasharray="5 3" dot={false} />
+              <Line type="monotone" dataKey="activeUsers" name="活跃用户" stroke={palette[0]} strokeWidth={2} dot={false} activeDot={{ r: 3 }} />
+              <Line type="monotone" dataKey="cumulativeUsers" name="累计注册" stroke={palette[1]} strokeWidth={1.5} strokeDasharray="5 3" dot={false} />
             </LineChart>
           </TrendCard>
 
@@ -318,12 +342,13 @@ export default function DashboardPage() {
             anchorTrend={calcTrend(last?.sessions ?? 0, prev?.sessions)}
           >
             <BarChart data={chartSeries} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+              <BarGradient id="overviewSessions" color={palette[0]} />
               <CartesianGrid stroke={colors.grid} vertical={false} />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
               <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={36} allowDecimals={false} />
-              <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} />
-              <Bar dataKey="okSessions" name="正常会话" stackId="s" fill={palette[0]} />
-              <Bar dataKey="errorSessions" name="失败会话" stackId="s" fill={palette[4]} radius={[3, 3, 0, 0]} />
+              <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} cursor={{ fill: colors.grid, opacity: 0.35 }} />
+              <Bar dataKey="okSessions" name="正常会话" stackId="s" fill="url(#overviewSessions)" />
+              <Bar dataKey="errorSessions" name="失败会话" stackId="s" fill={palette[4]} radius={[4, 4, 0, 0]} />
             </BarChart>
           </TrendCard>
 
@@ -335,13 +360,16 @@ export default function DashboardPage() {
             anchorTrend={calcTrend(last?.totalTokens ?? 0, prev?.totalTokens)}
           >
             <BarChart data={series} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+              <BarGradient id="overviewTokIn" color={palette[0]} />
+              <BarGradient id="overviewTokOut" color={palette[2]} />
+              <BarGradient id="overviewTokCache" color={palette[1]} />
               <CartesianGrid stroke={colors.grid} vertical={false} />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
               <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={48} tickFormatter={(v) => formatTokens(Number(v))} />
-              <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} formatter={(v) => formatTokens(Number(v))} />
-              <Bar dataKey="inputTokens" name="输入" stackId="t" fill={palette[0]} />
-              <Bar dataKey="outputTokens" name="输出" stackId="t" fill={palette[2]} />
-              <Bar dataKey="cacheTokens" name="Cache" stackId="t" fill={palette[1]} radius={[3, 3, 0, 0]} />
+              <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} formatter={(v) => formatTokens(Number(v))} cursor={{ fill: colors.grid, opacity: 0.35 }} />
+              <Bar dataKey="inputTokens" name="输入" stackId="t" fill="url(#overviewTokIn)" />
+              <Bar dataKey="outputTokens" name="输出" stackId="t" fill="url(#overviewTokOut)" />
+              <Bar dataKey="cacheTokens" name="Cache" stackId="t" fill="url(#overviewTokCache)" radius={[4, 4, 0, 0]} />
             </BarChart>
           </TrendCard>
 

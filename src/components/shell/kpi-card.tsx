@@ -25,12 +25,12 @@ export function KpiCard({
   return (
     <div
       className={cn(
-        "flex flex-col justify-between gap-3 rounded-lg bg-card p-4 ring-1 ring-foreground/10",
+        "group flex flex-col justify-between gap-3 rounded-xl bg-card p-4 shadow-card ring-1 ring-foreground/5 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-card-hover",
         className
       )}
     >
       <p className="text-xs font-medium text-muted-foreground">{label}</p>
-      <p className="text-[28px] font-semibold leading-none tracking-tight tabular-nums">{value}</p>
+      <p className="text-gradient-brand text-[28px] font-semibold leading-none tracking-tight tabular-nums">{value}</p>
       {sub || trend ? (
         <div className="flex items-center justify-between gap-2">
           {sub ? (
