@@ -69,15 +69,23 @@ export function AppSidebar() {
     : navGroups;
 
   return (
-    <aside className="relative flex h-full w-60 shrink-0 flex-col bg-sidebar/70 backdrop-blur-xl">
-      {/* 右边缘渐变发丝线：中间实、两端渐隐 */}
+    <aside className="relative flex h-full w-60 shrink-0 flex-col overflow-hidden bg-sidebar/70 backdrop-blur-xl dark:bg-sidebar/85">
+      {/* HUD 装饰层（仅深色模式渲染出效果）：角落辉光 + 噪点 + 缓慢扫光 */}
+      <div aria-hidden className="pointer-events-none absolute inset-0">
+        <div className="hud-glow absolute inset-0" />
+        <div className="hud-noise absolute inset-0" />
+        <div className="hud-sweep absolute -left-[40%] -top-[30%] h-[60%] w-[80%]" />
+      </div>
+
+      {/* 右边缘发丝线：中间实、两端渐隐（深色下中段发光） */}
       <span
         aria-hidden
         className="pointer-events-none absolute inset-y-0 right-0 w-px bg-gradient-to-b from-transparent via-sidebar-border to-transparent"
       />
+      <span aria-hidden className="hud-hairline pointer-events-none absolute inset-y-0 right-0 w-px" />
 
       {/* 品牌区：项目 logo + 渐变光环 + 柔光投影 */}
-      <div className="flex h-14 items-center gap-2.5 px-4">
+      <div className="relative flex h-14 items-center gap-2.5 px-4">
         <div className="relative shrink-0 rounded-md bg-brand-gradient p-px shadow-[0_2px_12px_-2px_rgb(90_80_235/0.45)]">
           <Image
             src="/logo.jpg"
@@ -90,12 +98,14 @@ export function AppSidebar() {
         </div>
         <div className="flex flex-col">
           <span className="text-sm font-semibold tracking-tight">LinkAI Insight</span>
-          <span className="text-[11px] leading-tight text-muted-foreground">Agent 运维平台</span>
+          <span className="font-mono text-[10px] leading-tight tracking-[0.14em] text-muted-foreground">
+            AGENT OPS PLATFORM
+          </span>
         </div>
       </div>
 
       {/* 导航搜索：Ctrl/Cmd + K 过滤导航项 */}
-      <div className="px-3 pb-1">
+      <div className="relative px-3 pb-1">
         <div className="flex h-8 items-center gap-2 rounded-lg bg-foreground/[0.04] px-2.5 ring-1 ring-foreground/5 transition-all focus-within:bg-background focus-within:ring-2 focus-within:ring-primary/25">
           <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           <input
@@ -121,15 +131,25 @@ export function AppSidebar() {
         </div>
       </div>
 
-      <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-3 scrollbar-thin">
+      <nav className="relative flex-1 space-y-5 overflow-y-auto overflow-x-hidden px-3 py-3 scrollbar-thin">
         {visibleGroups.length === 0 ? (
           <p className="px-2 py-6 text-center text-xs text-muted-foreground">无匹配的导航项</p>
         ) : (
-          visibleGroups.map((group) => (
+          visibleGroups.map((group, gi) => (
             <div key={group.label}>
-              <p className="mb-1.5 px-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                {group.label}
-              </p>
+              {/* 分组标题：mono 编号 + 渐变发丝分隔线 */}
+              <div className="mb-1.5 flex items-center gap-2 px-2">
+                <span className="font-mono text-[10px] tracking-[0.16em] text-muted-foreground/70">
+                  {String(navGroups.findIndex((g) => g.label === group.label) + 1).padStart(2, "0")}
+                </span>
+                <span className="text-[11px] font-medium tracking-wider text-muted-foreground/80">
+                  {group.label}
+                </span>
+                <span
+                  aria-hidden
+                  className="h-px flex-1 bg-gradient-to-r from-primary/25 via-border/40 to-transparent"
+                />
+              </div>
               <div className="space-y-0.5">
                 {group.items.map((item) => {
                   const active = item.matchPrefixes
@@ -140,18 +160,37 @@ export function AppSidebar() {
                     <Link
                       key={item.href}
                       href={item.href}
+                      onMouseMove={(e) => {
+                        const r = e.currentTarget.getBoundingClientRect();
+                        e.currentTarget.style.setProperty("--mx", `${e.clientX - r.left}px`);
+                      }}
                       className={cn(
                         "relative flex items-center gap-2.5 rounded-lg px-2 py-2 text-[13px] transition-all duration-150",
                         active
-                          ? "bg-card font-medium text-primary shadow-sm ring-1 ring-foreground/[0.06]"
-                          : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-sidebar-accent-foreground",
+                          ? "nav-pill bg-card font-medium text-primary shadow-sm ring-1 ring-foreground/[0.06] dark:bg-transparent dark:text-foreground dark:shadow-none dark:ring-0"
+                          : "nav-spotlight text-muted-foreground hover:bg-foreground/[0.04] hover:text-sidebar-accent-foreground dark:hover:bg-transparent",
                       )}
                     >
                       {active && (
-                        <span className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-brand-gradient" />
+                        <>
+                          {/* 身后的品牌光晕（收紧的小光斑） */}
+                          <span
+                            aria-hidden
+                            className="nav-halo pointer-events-none absolute left-1 top-1/2 h-6 w-10 -translate-y-1/2 rounded-full"
+                          />
+                          {/* 左侧流动渐变指示条 */}
+                          <span className="nav-indicator-flow absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-brand-gradient" />
+                        </>
                       )}
-                      <Icon className={cn("h-4 w-4 shrink-0", active ? "text-primary" : "text-muted-foreground/70")} />
-                      {item.label}
+                      <Icon
+                        className={cn(
+                          "relative h-4 w-4 shrink-0",
+                          active
+                            ? "text-primary dark:text-primary dark:drop-shadow-[0_0_6px_rgba(88,166,255,0.75)]"
+                            : "text-muted-foreground/70",
+                        )}
+                      />
+                      <span className="relative">{item.label}</span>
                     </Link>
                   );
                 })}
@@ -162,14 +201,16 @@ export function AppSidebar() {
       </nav>
 
       {/* 底部用户卡片 */}
-      <div className="p-3">
-        <div className="flex items-center gap-2.5 rounded-xl border border-sidebar-border/60 bg-card/80 px-2.5 py-2 shadow-sm">
+      <div className="relative p-3">
+        <div className="flex items-center gap-2.5 rounded-xl border border-sidebar-border/60 bg-card/80 px-2.5 py-2 shadow-sm dark:bg-white/[0.04] dark:shadow-none">
           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-[11px] font-medium text-white shadow-sm">
             Pi
           </div>
           <div className="flex min-w-0 flex-1 flex-col">
             <span className="truncate text-xs font-medium text-foreground">管理员</span>
-            <span className="truncate text-[10px] leading-tight text-muted-foreground">admin@linkai</span>
+            <span className="truncate font-mono text-[10px] leading-tight text-muted-foreground">
+              admin@linkai
+            </span>
           </div>
           <ThemeToggle />
         </div>

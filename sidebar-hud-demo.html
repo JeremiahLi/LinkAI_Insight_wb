@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LinkAI Insight · 侧栏科技感 Demo（现状 vs 提案）</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Geist:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  /* ============================================================
+     Design tokens —— 与 src/app/globals.css 对齐
+     ============================================================ */
+  :root {
+    --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+      "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, "JetBrains Mono",
+      "Cascadia Code", Menlo, Consolas, monospace;
+
+    /* 品牌渐变（紫 → 蓝青），取自 --gradient-brand */
+    --brand-from: #7b5cfa;
+    --brand-to: #22b8e6;
+    --gradient-brand: linear-gradient(135deg, var(--brand-from), var(--brand-to));
+
+    /* 内容区（浅色） */
+    --background: oklch(0.972 0.005 260);
+    --card: #ffffff;
+    --foreground: oklch(0.18 0.02 260);
+    --muted-fg: oklch(0.52 0.02 260);
+    --border: oklch(0.92 0.005 260);
+    --chart-line: #22a3d6;
+
+    /* HUD 侧栏（提案） */
+    --hud-bg: #0a0e1a;
+    --hud-fg: #e6edf3;
+    --hud-fg-dim: #8b949e;
+    --hud-fg-faint: #6e7681;
+    --hud-line: rgba(140, 170, 220, 0.12);
+    --hud-accent: #58a6ff;
+    --hud-pill: rgba(88, 166, 255, 0.10);
+    --hud-green: #3fb950;
+    --hud-orange: #f0883e;
+    --hud-violet: #a371f7;
+
+    /* 现状侧栏（legacy） */
+    --lg-bg: oklch(0.985 0.003 260);
+    --lg-fg: oklch(0.22 0.02 260);
+    --lg-fg-dim: oklch(0.52 0.02 260);
+    --lg-border: oklch(0.92 0.005 260);
+    --lg-primary: oklch(0.52 0.17 275);
+    --lg-card: #ffffff;
+  }
+
+  .theme-dark {
+    --background: #0d1117;
+    --card: #161b22;
+    --foreground: #e6edf3;
+    --muted-fg: #8b949e;
+    --border: #30363d;
+    --brand-from: #8b6ef5;
+    --brand-to: #3fc4e8;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { height: 100%; }
+  body {
+    font-family: var(--font-sans);
+    background: var(--background);
+    color: var(--foreground);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    transition: background 0.25s ease, color 0.25s ease;
+  }
+
+  /* ============================================================
+     舞台：侧栏 + 内容区
+     ============================================================ */
+  .stage { display: flex; height: 100vh; width: 100vw; }
+
+  /* ---------- 侧栏通用 ---------- */
+  .sidebar {
+    position: relative;
+    width: 240px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: background 0.3s ease;
+  }
+
+  /* ============================================================
+     提案：深色 HUD 侧栏
+     ============================================================ */
+  .sidebar[data-mode="hud"] {
+    background: var(--hud-bg);
+    color: var(--hud-fg);
+    border-right: 1px solid var(--hud-line);
+  }
+
+  /* 装饰层容器 */
+  .hud-deco { display: none; }
+  .sidebar[data-mode="hud"] .hud-deco { display: block; }
+
+  /* ① 角落品牌辉光 */
+  .deco-glow {
+    position: absolute; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(26rem 16rem at 20% -12%, rgba(124, 92, 255, 0.22), transparent 62%),
+      radial-gradient(22rem 14rem at 110% 22%, rgba(34, 184, 230, 0.16), transparent 60%),
+      radial-gradient(18rem 12rem at 50% 112%, rgba(163, 113, 247, 0.12), transparent 65%);
+    mix-blend-mode: screen;
+    opacity: 0.9;
+  }
+
+  /* ② 噪点（防止渐变断层，抬质感） */
+  .deco-noise {
+    position: absolute; inset: 0; pointer-events: none; opacity: 0.035;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  /* ④ 顶部扫过的柔光（缓慢流动，暗示“系统在运行”） */
+  .deco-sweep {
+    position: absolute; left: -40%; top: -30%; width: 80%; height: 60%;
+    pointer-events: none;
+    background: linear-gradient(115deg, transparent 30%, rgba(124, 92, 255, 0.18) 50%, transparent 70%);
+    filter: blur(28px);
+    animation: sweep 9s ease-in-out infinite;
+  }
+  @keyframes sweep {
+    0%   { transform: translate3d(0, 0, 0) rotate(0deg); opacity: 0.55; }
+    50%  { transform: translate3d(150%, 20%, 0) rotate(6deg); opacity: 0.95; }
+    100% { transform: translate3d(0, 0, 0) rotate(0deg); opacity: 0.55; }
+  }
+
+  /* ⑤ 右边缘发丝线：中段发光、两端渐隐 */
+  .deco-hairline {
+    position: absolute; top: 0; right: 0; width: 1px; height: 100%;
+    pointer-events: none;
+    background: linear-gradient(
+      to bottom,
+      transparent 0%,
+      rgba(124, 92, 255, 0.45) 30%,
+      rgba(88, 166, 255, 0.75) 50%,
+      rgba(34, 184, 230, 0.45) 70%,
+      transparent 100%
+    );
+    box-shadow: 0 0 12px 0 rgba(88, 166, 255, 0.35);
+  }
+
+  /* ---------- 品牌区 ---------- */
+  .brand {
+    position: relative; z-index: 2;
+    display: flex; align-items: center; gap: 10px;
+    height: 56px; padding: 0 16px; flex-shrink: 0;
+  }
+  .logo-ring {
+    position: relative; width: 30px; height: 30px; flex-shrink: 0;
+    border-radius: 8px; padding: 1.5px;
+    background: var(--gradient-brand);
+  }
+  .sidebar[data-mode="hud"] .logo-ring {
+    box-shadow: 0 0 18px -2px rgba(124, 92, 255, 0.55), 0 0 40px -8px rgba(34, 184, 230, 0.35);
+  }
+  .logo-inner {
+    width: 100%; height: 100%; border-radius: 6.5px;
+    background: #12162a;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .logo-inner svg { width: 16px; height: 16px; }
+  .brand-title { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; }
+  .brand-sub { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.18em; line-height: 1.4; }
+  .sidebar[data-mode="hud"] .brand-sub { color: var(--hud-fg-faint); }
+  .sidebar[data-mode="hud"] .brand-title { color: var(--hud-fg); }
+  .sidebar[data-mode="legacy"] .brand-sub { color: var(--lg-fg-dim); }
+  .sidebar[data-mode="legacy"] .brand-title { color: var(--lg-fg); }
+  .sidebar[data-mode="legacy"] .logo-inner { background: var(--lg-card); }
+
+  /* ---------- 搜索框 ---------- */
+  .search-wrap { position: relative; z-index: 2; padding: 4px 12px 8px; }
+  .search {
+    display: flex; align-items: center; gap: 8px;
+    height: 32px; padding: 0 10px; border-radius: 10px;
+    font-size: 12.5px;
+  }
+  .sidebar[data-mode="hud"] .search {
+    background: rgba(140, 170, 220, 0.06);
+    border: 1px solid rgba(140, 170, 220, 0.10);
+    color: var(--hud-fg-dim);
+  }
+  .sidebar[data-mode="hud"] .search:focus-within {
+    border-color: rgba(88, 166, 255, 0.45);
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.12), 0 0 22px -6px rgba(88, 166, 255, 0.45);
+    background: rgba(140, 170, 220, 0.09);
+  }
+  .sidebar[data-mode="legacy"] .search {
+    background: rgba(20, 20, 40, 0.04);
+    border: 1px solid rgba(20, 20, 40, 0.05);
+    color: var(--lg-fg-dim);
+  }
+  .search svg { width: 13px; height: 13px; flex-shrink: 0; opacity: 0.75; }
+  .search input {
+    flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: transparent;
+    font: inherit; color: inherit;
+  }
+  .search input::placeholder { color: inherit; opacity: 0.62; }
+  kbd {
+    font-family: var(--font-mono); font-size: 9.5px; line-height: 1;
+    padding: 3px 5px; border-radius: 5px; letter-spacing: 0.02em;
+  }
+  .sidebar[data-mode="hud"] kbd {
+    color: var(--hud-fg-faint);
+    border: 1px solid rgba(140, 170, 220, 0.16);
+    background: rgba(140, 170, 220, 0.06);
+  }
+  .sidebar[data-mode="legacy"] kbd {
+    color: var(--lg-fg-dim);
+    border: 1px solid var(--lg-border);
+    background: rgba(255, 255, 255, 0.6);
+  }
+
+  /* ---------- 导航 ---------- */
+  .nav {
+    position: relative; z-index: 2;
+    flex: 1; overflow-y: auto; overflow-x: hidden;
+    padding: 10px 12px 12px;
+    display: flex; flex-direction: column; gap: 18px;
+    scrollbar-width: thin;
+  }
+  .nav::-webkit-scrollbar { width: 5px; }
+  .nav::-webkit-scrollbar-thumb { background: rgba(140,170,220,0.18); border-radius: 3px; }
+
+  .group-label {
+    display: flex; align-items: baseline; gap: 7px;
+    padding: 0 8px 7px;
+  }
+  .group-idx {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.12em;
+    opacity: 0.55;
+  }
+  .group-name { font-size: 11px; letter-spacing: 0.16em; font-weight: 500; }
+  /* HUD 模式才显示编号 */
+  .sidebar[data-mode="hud"] .group-label {
+    font-family: var(--font-mono);
+    color: var(--hud-fg-faint);
+    text-transform: none;
+  }
+  .sidebar[data-mode="legacy"] .group-idx { display: none; }
+  .sidebar[data-mode="legacy"] .group-label {
+    font-family: var(--font-sans);
+    font-size: 11px; letter-spacing: 0.12em;
+    color: var(--lg-fg-dim); text-transform: none;
+    font-weight: 500;
+  }
+  /* HUD：标题前后加发光短线 */
+  .group-rule {
+    flex: 1; height: 1px; opacity: 0.55;
+    background: linear-gradient(to right, rgba(124,92,255,0.35), rgba(140,170,220,0.06));
+  }
+  .sidebar[data-mode="legacy"] .group-rule {
+    background: linear-gradient(to right, var(--lg-border), transparent);
+  }
+
+  .items { display: flex; flex-direction: column; gap: 2px; }
+
+  .item {
+    position: relative;
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px; border-radius: 10px;
+    font-size: 13px; text-decoration: none;
+    cursor: pointer;
+    transition: background 0.16s ease, color 0.16s ease, transform 0.16s ease;
+  }
+  .item svg { width: 15px; height: 15px; flex-shrink: 0; }
+
+  /* --- 提案：发光玻璃胶囊 --- */
+  .sidebar[data-mode="hud"] .item { color: var(--hud-fg-dim); }
+  .sidebar[data-mode="hud"] .item:hover {
+    color: var(--hud-fg);
+    background:
+      radial-gradient(120px 60px at var(--mx, 50%) 50%, rgba(88, 166, 255, 0.12), transparent 72%),
+      rgba(140, 170, 220, 0.05);
+  }
+  .sidebar[data-mode="hud"] .item.active {
+    color: var(--hud-fg);
+    background:
+      linear-gradient(rgba(24, 32, 52, 0.72), rgba(24, 32, 52, 0.72)) padding-box,
+      linear-gradient(120deg, rgba(124, 92, 255, 0.75), rgba(88, 166, 255, 0.55), rgba(34, 184, 230, 0.75)) border-box;
+    border: 1px solid transparent;
+    box-shadow:
+      0 0 0 1px rgba(88, 166, 255, 0.04),
+      0 0 10px -2px rgba(88, 166, 255, 0.32),
+      0 6px 18px -10px rgba(0, 0, 0, 0.55),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    font-weight: 500;
+    animation: pill-breathe 3.2s ease-in-out infinite;
+  }
+  @keyframes pill-breathe {
+    0%, 100% {
+      box-shadow:
+        0 0 0 1px rgba(88, 166, 255, 0.04),
+        0 0 10px -2px rgba(88, 166, 255, 0.32),
+        0 6px 18px -10px rgba(0, 0, 0, 0.55),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+    50% {
+      box-shadow:
+        0 0 0 1px rgba(88, 166, 255, 0.08),
+        0 0 13px -2px rgba(88, 166, 255, 0.45),
+        0 6px 18px -10px rgba(0, 0, 0, 0.55),
+        inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+  }
+
+  /* 身后的品牌光晕（收紧的小光斑） */
+  .item.active .halo {
+    position: absolute; left: 2px; top: 50%; transform: translateY(-50%);
+    width: 40px; height: 24px; border-radius: 999px;
+    background: var(--gradient-brand);
+    filter: blur(12px); opacity: 0.28; pointer-events: none;
+    z-index: -1;
+  }
+
+  /* 左侧流动渐变指示条 */
+  .indicator {
+    position: absolute; left: -3px; top: 50%; transform: translateY(-50%);
+    width: 3px; height: 18px; border-radius: 999px;
+    background: linear-gradient(180deg, var(--brand-from), var(--brand-to), var(--brand-from));
+    background-size: 100% 220%;
+    animation: flow 2.6s linear infinite;
+    box-shadow: 0 0 10px 1px rgba(88, 166, 255, 0.65);
+    display: none;
+  }
+  .sidebar[data-mode="hud"] .item.active .indicator { display: block; }
+  @keyframes flow {
+    0%   { background-position: 0% 0%; }
+    100% { background-position: 0% 220%; }
+  }
+
+  /* 图标微光 */
+  .sidebar[data-mode="hud"] .item.active svg {
+    color: var(--hud-accent);
+    filter: drop-shadow(0 0 6px rgba(88, 166, 255, 0.75));
+  }
+  .sidebar[data-mode="hud"] .item:hover svg { color: var(--hud-fg); }
+
+  /* --- 现状：白卡片 + 3px 渐变竖条 --- */
+  .sidebar[data-mode="legacy"] .item { color: var(--lg-fg-dim); }
+  .sidebar[data-mode="legacy"] .item:hover {
+    background: rgba(20, 20, 40, 0.04); color: var(--lg-fg);
+  }
+  .sidebar[data-mode="legacy"] .item.active {
+    background: var(--lg-card); color: var(--lg-primary);
+    font-weight: 500;
+    box-shadow: 0 1px 2px rgba(24, 20, 48, 0.06);
+    border: 1px solid rgba(20, 20, 40, 0.05);
+  }
+  .sidebar[data-mode="legacy"] .item.active svg { color: var(--lg-primary); }
+  .sidebar[data-mode="legacy"] .indicator {
+    display: block;
+    left: -1px; width: 3px; height: 16px;
+    background: var(--gradient-brand);
+    box-shadow: none; animation: none;
+    background-size: 100% 100%;
+  }
+  .sidebar[data-mode="legacy"] .halo { display: none; }
+
+  /* 徽章 */
+  .badge {
+    margin-left: auto;
+    font-family: var(--font-mono); font-size: 10px; line-height: 1;
+    padding: 3px 6px; border-radius: 999px; font-weight: 500;
+  }
+  .sidebar[data-mode="hud"] .badge {
+    color: var(--hud-orange);
+    background: rgba(240, 136, 62, 0.14);
+    border: 1px solid rgba(240, 136, 62, 0.32);
+    box-shadow: 0 0 12px -2px rgba(240, 136, 62, 0.45);
+  }
+  .sidebar[data-mode="legacy"] .badge {
+    color: #c2641c; background: rgba(240, 136, 62, 0.12);
+    border: 1px solid rgba(240, 136, 62, 0.22);
+  }
+
+  /* ---------- 底部：状态条 + 用户卡 ---------- */
+  .footer { position: relative; z-index: 2; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+
+  .status-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-radius: 10px;
+    font-family: var(--font-mono); font-size: 10px;
+  }
+  .sidebar[data-mode="hud"] .status-bar {
+    background: rgba(140, 170, 220, 0.05);
+    border: 1px solid rgba(140, 170, 220, 0.10);
+    color: var(--hud-fg-dim);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  }
+  .sidebar[data-mode="legacy"] .status-bar {
+    background: rgba(20, 20, 40, 0.035);
+    border: 1px solid var(--lg-border);
+    color: var(--lg-fg-dim);
+  }
+
+  .pulse-dot {
+    width: 7px; height: 7px; border-radius: 999px; flex-shrink: 0;
+    background: var(--hud-green);
+    box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.65);
+    animation: pulse 2s ease-out infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.6); }
+    70%  { box-shadow: 0 0 0 7px rgba(63, 185, 80, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0); }
+  }
+  .status-ok { color: var(--hud-green); }
+  .status-warn { color: var(--hud-orange); }
+  .sparkline { margin-left: auto; opacity: 0.9; }
+
+  .user-card {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px; border-radius: 12px;
+  }
+  .sidebar[data-mode="hud"] .user-card {
+    background: rgba(140, 170, 220, 0.05);
+    border: 1px solid rgba(140, 170, 220, 0.10);
+  }
+  .sidebar[data-mode="legacy"] .user-card {
+    background: rgba(255, 255, 255, 0.8);
+    border: 1px solid var(--lg-border);
+    box-shadow: 0 1px 2px rgba(24, 20, 48, 0.05);
+  }
+  .avatar {
+    width: 26px; height: 26px; border-radius: 999px; flex-shrink: 0;
+    background: var(--gradient-brand);
+    color: #fff; font-size: 10.5px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    letter-spacing: 0.02em;
+  }
+  .sidebar[data-mode="hud"] .avatar { box-shadow: 0 0 14px -2px rgba(124, 92, 255, 0.6); }
+  .user-meta { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+  .user-name { font-size: 11.5px; font-weight: 500; line-height: 1.35; }
+  .user-mail {
+    font-family: var(--font-mono); font-size: 9.5px; line-height: 1.35;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .sidebar[data-mode="hud"] .user-name { color: var(--hud-fg); }
+  .sidebar[data-mode="hud"] .user-mail { color: var(--hud-fg-faint); }
+  .sidebar[data-mode="legacy"] .user-name { color: var(--lg-fg); }
+  .sidebar[data-mode="legacy"] .user-mail { color: var(--lg-fg-dim); }
+
+  .theme-btn {
+    width: 24px; height: 24px; border-radius: 7px; border: 0; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    background: transparent;
+  }
+  .sidebar[data-mode="hud"] .theme-btn { color: var(--hud-fg-dim); background: rgba(140,170,220,0.08); }
+  .sidebar[data-mode="legacy"] .theme-btn { color: var(--lg-fg-dim); background: rgba(20,20,40,0.05); }
+  .theme-btn:hover { filter: brightness(1.25); }
+  .theme-btn svg { width: 13px; height: 13px; }
+
+  /* ============================================================
+     主内容区（演示对比背景）
+     ============================================================ */
+  .main {
+    position: relative; flex: 1; min-width: 0;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .aurora {
+    position: absolute; inset: 0; pointer-events: none;
+    background-image:
+      radial-gradient(42rem 26rem at 85% -8%, rgba(124, 92, 255, 0.09), transparent 65%),
+      radial-gradient(38rem 24rem at -10% 30%, rgba(34, 184, 230, 0.07), transparent 65%),
+      radial-gradient(30rem 22rem at 60% 110%, rgba(163, 113, 247, 0.06), transparent 65%);
+  }
+  .theme-dark .aurora {
+    background-image:
+      radial-gradient(42rem 26rem at 85% -8%, rgba(124, 92, 255, 0.14), transparent 65%),
+      radial-gradient(38rem 24rem at -10% 30%, rgba(34, 184, 230, 0.10), transparent 65%);
+  }
+
+  .topbar {
+    position: relative; z-index: 2; height: 56px; flex-shrink: 0;
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 24px;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in oklab, var(--card) 55%, transparent);
+    backdrop-filter: blur(12px);
+  }
+  .topbar h1 { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+  .topbar .crumb {
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--muted-fg);
+    letter-spacing: 0.08em;
+  }
+  .live-chip {
+    margin-left: auto; display: flex; align-items: center; gap: 7px;
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em;
+    color: var(--muted-fg);
+    border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px;
+    background: color-mix(in oklab, var(--card) 70%, transparent);
+  }
+  .live-chip .pulse-dot { width: 6px; height: 6px; }
+
+  .content {
+    position: relative; z-index: 2;
+    flex: 1; overflow-y: auto; padding: 24px;
+    display: flex; flex-direction: column; gap: 18px;
+  }
+
+  .kpi-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .kpi {
+    border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px;
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(24, 20, 48, 0.04), 0 8px 24px -12px rgba(30, 20, 60, 0.12);
+  }
+  .kpi .label {
+    font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.16em;
+    color: var(--muted-fg); text-transform: uppercase;
+  }
+  .kpi .value {
+    font-size: 30px; font-weight: 650; letter-spacing: -0.02em; margin-top: 6px;
+    background: var(--gradient-brand);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .kpi .delta {
+    font-family: var(--font-mono); font-size: 10.5px; margin-top: 4px;
+    color: var(--hud-green);
+  }
+  .kpi .delta.down { color: var(--hud-orange); }
+
+  .panel {
+    border: 1px solid var(--border); border-radius: 14px;
+    background: var(--card); padding: 18px;
+    box-shadow: 0 1px 2px rgba(24, 20, 48, 0.04), 0 8px 24px -12px rgba(30, 20, 60, 0.12);
+  }
+  .panel-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
+  .panel-head h2 { font-size: 13px; font-weight: 600; }
+  .panel-head .tag {
+    font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.14em;
+    color: var(--muted-fg); border: 1px solid var(--border);
+    border-radius: 5px; padding: 2.5px 6px;
+  }
+
+  .chart {
+    width: 100%; height: 170px; border-radius: 10px;
+    background:
+      linear-gradient(to right, color-mix(in oklab, var(--border) 55%, transparent) 1px, transparent 1px) 0 0 / 12.5% 100%,
+      linear-gradient(to bottom, color-mix(in oklab, var(--border) 45%, transparent) 1px, transparent 1px) 0 0 / 100% 25%;
+  }
+
+  .note {
+    font-family: var(--font-mono); font-size: 10.5px; line-height: 1.8;
+    color: var(--muted-fg);
+  }
+  .note b { color: var(--foreground); font-weight: 500; }
+  .note code {
+    font-family: var(--font-mono);
+    background: color-mix(in oklab, var(--border) 35%, transparent);
+    padding: 1px 5px; border-radius: 4px;
+  }
+
+  /* ============================================================
+     浮动工具条（Demo 控制）
+     ============================================================ */
+  .toolbar {
+    position: fixed; right: 18px; bottom: 18px; z-index: 50;
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: 14px;
+    background: rgba(16, 22, 38, 0.86);
+    border: 1px solid rgba(140, 170, 220, 0.16);
+    box-shadow: 0 18px 50px -18px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+    backdrop-filter: blur(14px);
+    color: #c9d4e4;
+    font-family: var(--font-mono); font-size: 10.5px;
+  }
+  .seg {
+    display: flex; padding: 3px; gap: 3px; border-radius: 10px;
+    background: rgba(140, 170, 220, 0.08);
+    border: 1px solid rgba(140, 170, 220, 0.10);
+  }
+  .seg button {
+    border: 0; cursor: pointer; border-radius: 7px;
+    padding: 6px 11px; font: inherit; color: #9fb0c7;
+    background: transparent; transition: all 0.16s ease;
+    letter-spacing: 0.04em;
+  }
+  .seg button:hover { color: #e6edf3; }
+  .seg button.on {
+    color: #fff;
+    background: linear-gradient(135deg, rgba(124, 92, 255, 0.85), rgba(34, 184, 230, 0.75));
+    box-shadow: 0 0 16px -3px rgba(88, 166, 255, 0.6);
+  }
+  .toolbar .sep { width: 1px; height: 22px; background: rgba(140, 170, 220, 0.16); }
+  .hint { color: #7c8ba3; letter-spacing: 0.04em; }
+
+  /* 可访问性：减少动效 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+</style>
+</head>
+<body class="theme-dark">
+  <div class="stage">
+    <!-- ============ 侧栏 ============ -->
+    <aside class="sidebar" id="sidebar" data-mode="hud">
+      <!-- 装饰层 -->
+      <div class="hud-deco">
+        <div class="deco-glow"></div>
+        <div class="deco-noise"></div>
+        <div class="deco-sweep"></div>
+        <div class="deco-hairline"></div>
+      </div>
+
+      <!-- 品牌 -->
+      <div class="brand">
+        <div class="logo-ring">
+          <div class="logo-inner">
+            <svg viewBox="0 0 24 24" fill="none" stroke="url(#lg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <defs>
+                <linearGradient id="lg" x1="0" y1="0" x2="24" y2="24">
+                  <stop offset="0" stop-color="#8b6ef5" /><stop offset="1" stop-color="#3fc4e8" />
+                </linearGradient>
+              </defs>
+              <path d="M3 12h4l2-6 4 12 2-6h6" />
+            </svg>
+          </div>
+        </div>
+        <div>
+          <div class="brand-title">LinkAI Insight</div>
+          <div class="brand-sub">AGENT OPS PLATFORM</div>
+        </div>
+      </div>
+
+      <!-- 搜索 -->
+      <div class="search-wrap">
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" />
+          </svg>
+          <input id="nav-search" placeholder="搜索导航" />
+          <kbd>⌘K</kbd>
+        </div>
+      </div>
+
+      <!-- 导航 -->
+      <nav class="nav" id="nav">
+        <section class="group">
+          <div class="group-label">
+            <span class="group-idx">01</span>
+            <span class="group-name">运营观测</span>
+            <span class="group-rule"></span>
+          </div>
+          <div class="items">
+            <a class="item active" href="#"><span class="halo"></span><span class="indicator"></span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+              概览
+            </a>
+            <a class="item" href="#"><span class="halo"></span><span class="indicator"></span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              用户看板
+            </a>
+            <a class="item" href="#"><span class="halo"></span><span class="indicator"></span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              链路追踪
+            </a>
+            <a class="item" href="#"><span class="halo"></span><span class="indicator"></span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+              业务数据看板
+            </a>
+            <a class="item" href="#"><span class="halo"></span><span class="indicator"></span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>
+              Skill 使用看板
+            </a>
+            <a class="item" href="#"><span class="halo"></span><span class="indicator"></span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+              Agent 性能看板
+            </a>
+          </div>
+        </section>
+
+        <section class="group">
+          <div class="group-label">
+            <span class="group-idx">02</span>
+            <span class="group-name">质量与告警</span>
+            <span class="group-rule"></span>
+          </div>
+          <div class="items">
+            <a class="item" href="#"><span class="halo"></span><span class="indicator"></span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>
+              评测中心
+            </a>
+            <a class="item" href="#"><span class="halo"></span><span class="indicator"></span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+              告警中心
+              <span class="badge">3</span>
+            </a>
+          </div>
+        </section>
+
+        <section class="group">
+          <div class="group-label">
+            <span class="group-idx">03</span>
+            <span class="group-name">系统</span>
+            <span class="group-rule"></span>
+          </div>
+          <div class="items">
+            <a class="item" href="#"><span class="halo"></span><span class="indicator"></span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              设置
+            </a>
+          </div>
+        </section>
+      </nav>
+
+      <!-- 底部 -->
+      <div class="footer">
+        <div class="status-bar">
+          <span class="pulse-dot"></span>
+          <span class="status-ok">服务正常</span>
+          <span>·</span>
+          <span class="status-warn">告警 3</span>
+          <svg class="sparkline" width="60" height="16" viewBox="0 0 60 16" fill="none">
+            <polyline
+              points="0,12 7,10 14,11 21,6 28,8 35,4 42,7 49,3 56,5 60,2"
+              stroke="#3fc4e8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+            />
+          </svg>
+        </div>
+
+        <div class="user-card">
+          <div class="avatar">Pi</div>
+          <div class="user-meta">
+            <span class="user-name">管理员</span>
+            <span class="user-mail">admin@linkai</span>
+          </div>
+          <button class="theme-btn" id="theme-btn" title="切换内容区明暗">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ============ 主内容区 ============ -->
+    <div class="main" id="main">
+      <div class="aurora"></div>
+
+      <div class="topbar">
+        <h1>概览</h1>
+        <span class="crumb">/ OVERVIEW · REALTIME</span>
+        <div class="live-chip"><span class="pulse-dot"></span>LIVE · 5s</div>
+      </div>
+
+      <div class="content">
+        <div class="kpi-row">
+          <div class="kpi">
+            <div class="label">TODAY CALLS</div>
+            <div class="value">12.4K</div>
+            <div class="delta">▲ 8.2% vs 昨日</div>
+          </div>
+          <div class="kpi">
+            <div class="label">SUCCESS RATE</div>
+            <div class="value">99.2%</div>
+            <div class="delta">▲ 0.3% vs 昨日</div>
+          </div>
+          <div class="kpi">
+            <div class="label">P95 LATENCY</div>
+            <div class="value">1.8s</div>
+            <div class="delta down">▼ 0.2s vs 昨日</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>调用趋势</h2>
+            <span class="tag">TRACE / 24H</span>
+          </div>
+          <svg class="chart" viewBox="0 0 800 170" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#22a3d6" stop-opacity="0.28" />
+                <stop offset="1" stop-color="#22a3d6" stop-opacity="0" />
+              </linearGradient>
+              <linearGradient id="lineStroke" x1="0" y1="0" x2="800" y2="0">
+                <stop offset="0" stop-color="#7b5cfa" /><stop offset="1" stop-color="#22b8e6" />
+              </linearGradient>
+            </defs>
+            <path d="M0,130 C60,120 90,86 150,92 C210,98 240,58 300,66 C360,74 390,40 450,52 C510,64 540,30 600,42 C660,54 700,24 750,34 L800,28 L800,170 L0,170 Z" fill="url(#areaFill)" />
+            <path d="M0,130 C60,120 90,86 150,92 C210,98 240,58 300,66 C360,74 390,40 450,52 C510,64 540,30 600,42 C660,54 700,24 750,34 L800,28"
+                  fill="none" stroke="url(#lineStroke)" stroke-width="2.5" stroke-linecap="round" />
+            <circle cx="600" cy="42" r="4.5" fill="#22b8e6" />
+            <circle cx="600" cy="42" r="9" fill="#22b8e6" fill-opacity="0.18" />
+          </svg>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>本页说明</h2>
+            <span class="tag">DEMO NOTES</span>
+          </div>
+          <p class="note">
+            <b>提案（HUD）侧栏包含：</b>
+            深色基底 <code>#0a0e1a</code> ／ 角落品牌辉光 <code>radial-gradient + screen</code> ／
+            SVG 噪点 ／ 缓慢扫过的柔光 ／ 右边缘中段发光线。<b>网格纹理已按要求去掉。</b><br />
+            <b>激活项：</b>渐变描边玻璃胶囊 ＋ <b>收紧的小光晕</b>（身后 40×24 光斑 + 10px 外发光）＋
+            左侧流动渐变指示条 ＋ 图标 <code>drop-shadow</code> 微光。<br />
+            <b>Hover：</b>跟随鼠标的径向聚光灯（<code>--mx</code> 实时写入）。<br />
+            <b>排版：</b>分组标题用 Geist Mono ＋ <code>01</code> 编号 ＋ 渐变发丝分隔线；底部状态条含呼吸灯与 sparkline。<br />
+            <b>对比：</b>右下角可切换「现状 / 提案」，以及内容区明暗。<b>深色模式已设为工程默认。</b>
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 控制条 ============ -->
+  <div class="toolbar">
+    <span class="hint">侧栏</span>
+    <div class="seg" id="mode-seg">
+      <button data-mode="legacy">现状</button>
+      <button data-mode="hud" class="on">提案 HUD</button>
+    </div>
+    <div class="sep"></div>
+    <span class="hint">内容区</span>
+    <div class="seg" id="theme-seg">
+      <button data-theme="light">浅色</button>
+      <button data-theme="dark" class="on">深色</button>
+    </div>
+  </div>
+
+  <script>
+    // ---------- 侧栏模式切换（现状 / 提案） ----------
+    const sidebar = document.getElementById("sidebar");
+    document.querySelectorAll("#mode-seg button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#mode-seg button").forEach((b) => b.classList.remove("on"));
+        btn.classList.add("on");
+        sidebar.dataset.mode = btn.dataset.mode;
+      });
+    });
+
+    // ---------- 内容区明暗 ----------
+    const main = document.getElementById("main");
+    document.querySelectorAll("#theme-seg button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#theme-seg button").forEach((b) => b.classList.remove("on"));
+        btn.classList.add("on");
+        document.body.classList.toggle("theme-dark", btn.dataset.theme === "dark");
+      });
+    });
+
+    // ---------- 菜单切换（演示激活态动画） ----------
+    document.querySelectorAll(".item").forEach((item) => {
+      item.addEventListener("click", (e) => {
+        e.preventDefault();
+        document.querySelectorAll(".item").forEach((i) => i.classList.remove("active"));
+        item.classList.add("active");
+      });
+    });
+
+    // ---------- Hover 聚光灯：把鼠标位置写入 --mx ----------
+    document.querySelectorAll(".item").forEach((item) => {
+      item.addEventListener("mousemove", (e) => {
+        const r = item.getBoundingClientRect();
+        item.style.setProperty("--mx", e.clientX - r.left + "px");
+      });
+    });
+
+    // ---------- ⌘K / Ctrl+K 聚焦搜索 ----------
+    const search = document.getElementById("nav-search");
+    window.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        search.focus();
+      }
+    });
+
+    // ---------- 导航过滤（与线上一致） ----------
+    search.addEventListener("input", () => {
+      const kw = search.value.trim().toLowerCase();
+      document.querySelectorAll(".group").forEach((g) => {
+        let visible = 0;
+        g.querySelectorAll(".item").forEach((it) => {
+          const hit = !kw || it.textContent.toLowerCase().includes(kw);
+          it.style.display = hit ? "" : "none";
+          if (hit) visible++;
+        });
+        g.style.display = visible ? "" : "none";
+      });
+    });
+  </script>
+</body>
+</html>

@@ -14,11 +14,14 @@ const preventFouc = `
 (function() {
   try {
     var theme = localStorage.getItem('theme');
-    if (!theme) {
-      theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    // 默认深色：无显式偏好时一律深色
+    if (theme !== 'light') {
+      theme = 'dark';
     }
     document.documentElement.classList.toggle('dark', theme === 'dark');
-  } catch (e) {}
+  } catch (e) {
+    document.documentElement.classList.add('dark');
+  }
 })();
 `;
 

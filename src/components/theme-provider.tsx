@@ -27,15 +27,10 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const stored = localStorage.getItem("theme");
-    if (stored) {
-      setTheme(stored);
-      document.documentElement.classList.toggle("dark", stored === "dark");
-    } else {
-      const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-      const initial = prefersDark ? "dark" : "light";
-      setTheme(initial);
-      document.documentElement.classList.toggle("dark", prefersDark);
-    }
+    // 默认深色：仅当显式存过 light 才用浅色
+    const next = stored === "light" ? "light" : "dark";
+    setTheme(next);
+    document.documentElement.classList.toggle("dark", next === "dark");
   }, []);
 
   const handleSetTheme = (newTheme: string) => {
