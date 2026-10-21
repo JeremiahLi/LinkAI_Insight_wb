@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
@@ -13,6 +14,7 @@ import {
   Bot,
   TrendingUp,
   Users,
+  Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "./theme-toggle";
@@ -44,12 +46,39 @@ const navGroups = [
 
 export function AppSidebar() {
   const pathname = usePathname();
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // Ctrl/Cmd + K 聚焦导航搜索
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const kw = query.trim().toLowerCase();
+  const visibleGroups = kw
+    ? navGroups
+        .map((g) => ({ ...g, items: g.items.filter((i) => i.label.toLowerCase().includes(kw)) }))
+        .filter((g) => g.items.length > 0)
+    : navGroups;
 
   return (
-    <aside className="flex h-full w-60 shrink-0 flex-col border-r border-sidebar-border/70 bg-sidebar/70 backdrop-blur-md">
-      {/* 品牌区：项目 logo + 渐变光环 */}
+    <aside className="relative flex h-full w-60 shrink-0 flex-col bg-sidebar/70 backdrop-blur-xl">
+      {/* 右边缘渐变发丝线：中间实、两端渐隐 */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-y-0 right-0 w-px bg-gradient-to-b from-transparent via-sidebar-border to-transparent"
+      />
+
+      {/* 品牌区：项目 logo + 渐变光环 + 柔光投影 */}
       <div className="flex h-14 items-center gap-2.5 px-4">
-        <div className="relative shrink-0 rounded-md bg-brand-gradient p-px">
+        <div className="relative shrink-0 rounded-md bg-brand-gradient p-px shadow-[0_2px_12px_-2px_rgb(90_80_235/0.45)]">
           <Image
             src="/logo.jpg"
             alt="LinkAI Insight"
@@ -65,50 +94,85 @@ export function AppSidebar() {
         </div>
       </div>
 
+      {/* 导航搜索：Ctrl/Cmd + K 过滤导航项 */}
+      <div className="px-3 pb-1">
+        <div className="flex h-8 items-center gap-2 rounded-lg bg-foreground/[0.04] px-2.5 ring-1 ring-foreground/5 transition-all focus-within:bg-background focus-within:ring-2 focus-within:ring-primary/25">
+          <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <input
+            ref={searchRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索导航"
+            className="h-full w-full bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground/70"
+          />
+          {query ? (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              className="shrink-0 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+            >
+              清空
+            </button>
+          ) : (
+            <kbd className="shrink-0 rounded border border-border/80 bg-background/60 px-1 font-mono text-[10px] leading-4 text-muted-foreground/80">
+              ⌘K
+            </kbd>
+          )}
+        </div>
+      </div>
+
       <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-3 scrollbar-thin">
-        {navGroups.map((group) => (
-          <div key={group.label}>
-            <p className="mb-1 px-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-              {group.label}
-            </p>
-            <div className="space-y-px">
-              {group.items.map((item) => {
-                const active = item.matchPrefixes
-                  ? item.matchPrefixes.some((p) => pathname.startsWith(p))
-                  : pathname === item.href;
-                const Icon = item.icon;
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    className={cn(
-                      "relative flex items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] transition-all duration-150",
-                      active
-                        ? "bg-primary/[0.08] font-medium text-primary"
-                        : "text-muted-foreground hover:translate-x-0.5 hover:bg-foreground/[0.04] hover:text-sidebar-accent-foreground",
-                    )}
-                  >
-                    {active && (
-                      <span className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-brand-gradient" />
-                    )}
-                    <Icon className={cn("h-4 w-4 shrink-0", active ? "text-primary" : "text-muted-foreground/70")} />
-                    {item.label}
-                  </Link>
-                );
-              })}
+        {visibleGroups.length === 0 ? (
+          <p className="px-2 py-6 text-center text-xs text-muted-foreground">无匹配的导航项</p>
+        ) : (
+          visibleGroups.map((group) => (
+            <div key={group.label}>
+              <p className="mb-1.5 px-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
+                {group.label}
+              </p>
+              <div className="space-y-0.5">
+                {group.items.map((item) => {
+                  const active = item.matchPrefixes
+                    ? item.matchPrefixes.some((p) => pathname.startsWith(p))
+                    : pathname === item.href;
+                  const Icon = item.icon;
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      className={cn(
+                        "relative flex items-center gap-2.5 rounded-lg px-2 py-2 text-[13px] transition-all duration-150",
+                        active
+                          ? "bg-card font-medium text-primary shadow-sm ring-1 ring-foreground/[0.06]"
+                          : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-sidebar-accent-foreground",
+                      )}
+                    >
+                      {active && (
+                        <span className="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-brand-gradient" />
+                      )}
+                      <Icon className={cn("h-4 w-4 shrink-0", active ? "text-primary" : "text-muted-foreground/70")} />
+                      {item.label}
+                    </Link>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        ))}
+          ))
+        )}
       </nav>
 
-      <div className="flex items-center justify-between border-t border-sidebar-border/70 px-4 py-2.5">
-        <div className="flex items-center gap-2">
-          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-brand-gradient text-[11px] font-medium text-white shadow-sm">
+      {/* 底部用户卡片 */}
+      <div className="p-3">
+        <div className="flex items-center gap-2.5 rounded-xl border border-sidebar-border/60 bg-card/80 px-2.5 py-2 shadow-sm">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-[11px] font-medium text-white shadow-sm">
             Pi
           </div>
-          <span className="text-xs text-muted-foreground">管理员</span>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <span className="truncate text-xs font-medium text-foreground">管理员</span>
+            <span className="truncate text-[10px] leading-tight text-muted-foreground">admin@linkai</span>
+          </div>
+          <ThemeToggle />
         </div>
-        <ThemeToggle />
       </div>
     </aside>
   );
