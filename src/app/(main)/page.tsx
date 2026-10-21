@@ -53,6 +53,8 @@ interface OverviewData {
   series: OverviewPoint[];
   cumulativeUsers: number;
   agentTotal: number;
+  /** 最近一条 Span 的上报时间（ISO）；无任何数据时为 null */
+  lastSpanAt: string | null;
 }
 
 interface Anomaly {
@@ -69,7 +71,31 @@ interface Anomaly {
   }[];
 }
 
-/** 锚点环比：与前一数据点比较，±5% 内视为持平 */
+/** 数据新鲜度三态：绿=30分钟内有上报；黄=延迟 30 分钟~2 小时；红=停报超 2 小时或从无数据 */
+function freshnessState(lastSpanAt: string | null, now: number) {
+  if (!lastSpanAt) return { level: "red" as const, text: "暂无数据上报" };
+  const diffMs = Math.max(0, now - new Date(lastSpanAt).getTime());
+  const mins = Math.floor(diffMs / 60000);
+  const hhmm = new Date(lastSpanAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  if (mins < 30) return { level: "green" as const, text: `数据截至 ${mins < 1 ? "1 分钟内" : `${mins} 分钟前`}` };
+  if (mins < 120) return { level: "amber" as const, text: `数据延迟 ${mins} 分钟（最后上报 ${hhmm}）` };
+  const hours = Math.floor(mins / 60);
+  return { level: "red" as const, text: `数据已停报 ${hours} 小时（最后上报 ${hhmm}）` };
+}
+
+function FreshnessDot({ level }: { level: "green" | "amber" | "red" }) {
+  const cls = level === "green" ? "bg-emerald-500" : level === "amber" ? "bg-warning" : "bg-destructive";
+  return <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${cls}`} />;
+}
+
+/** 锚点环比基准：weekly 档取前一日；30d/all 档取 7 天前同日（滤掉周末噪声），序列不足时回退前一日 */
+function pickPrev(series: OverviewPoint[], range: TrendRange): OverviewPoint | undefined {
+  if (series.length < 2) return undefined;
+  if (range === "weekly") return series[series.length - 2];
+  return series.length >= 8 ? series[series.length - 8] : series[series.length - 2];
+}
+
+/** 锚点环比：与基准点比较，±5% 内视为持平 */
 function calcTrend(current: number, prev?: number) {
   if (prev === undefined || prev === 0) return { percent: null as number | null, direction: "flat" as const };
   const change = ((current - prev) / prev) * 100;
@@ -133,6 +159,12 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
   const [alertsExpanded, setAlertsExpanded] = useState(false);
+  // 新鲜度相对时间的当前时刻：60s 轮询刷新，组件卸载时清理
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
   const colors = useChartColors();
   const palette = useCategoryPalette();
 
@@ -165,7 +197,7 @@ export default function DashboardPage() {
 
   const series = overview.series;
   const last = series.length > 0 ? series[series.length - 1] : null;
-  const prev = series.length > 1 ? series[series.length - 2] : undefined;
+  const prev = pickPrev(series, range);
 
   /** 图表数据：派生正常会话数 = 总数 - 失败数（供堆叠柱使用） */
   const chartSeries = series.map((p) => ({ ...p, okSessions: p.sessions - p.errorSessions }));
@@ -188,10 +220,21 @@ export default function DashboardPage() {
   return (
     <div className="flex flex-col gap-5 p-6">
       <PageHeader
-        title="仪表盘概览"
+        title="概览"
         description="平台全局运行趋势 · 单点数据仅作图上锚点"
         actions={<SegmentedControl options={TREND_RANGE_OPTIONS} value={range} onChange={setRange} />}
       />
+
+      {/* 数据新鲜度哨兵：采集断流时趋势线会"安静地变平"，此行防止误读为无流量 */}
+      {(() => {
+        const fresh = freshnessState(overview.lastSpanAt, now);
+        return (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <FreshnessDot level={fresh.level} />
+            <span>{fresh.text}</span>
+          </div>
+        );
+      })()}
 
       {/* 异常栏：唯一的"现在时"信息，固定反映实时异常 */}
       {anomalies.length > 0 && (
@@ -334,7 +377,7 @@ export default function DashboardPage() {
       )}
 
       <p className="text-[11px] text-muted-foreground/70">
-        锚点为所选范围最后一天的值及较前一日的环比；活跃用户 / 活跃 Agent 按当日去重计数。排行与单实体分析见 Agent / Session / Skill 看板。
+        锚点为所选范围最后一天的值及环比（近7天档对比前一日，30天/全部档对比 7 天前同日）；活跃用户 / 活跃 Agent 按当日去重计数。排行与单实体分析见 Agent / Session / Skill 看板。
       </p>
     </div>
   );

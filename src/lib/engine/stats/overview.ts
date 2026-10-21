@@ -33,6 +33,8 @@ export interface OverviewTrend {
   cumulativeUsers: number;
   /** Agent 总数（活跃 Agent 锚点分母） */
   agentTotal: number;
+  /** 最近一条 Span 的上报时间（数据新鲜度哨兵；无任何数据时为 null） */
+  lastSpanAt: Date | null;
 }
 
 function pad(n: number): string {
@@ -82,6 +84,9 @@ export async function getOverviewTrend(
   // 注册用户按日累积：一条轻查询拉全量 createdAt，用户量级小
   const users = await prisma.user.findMany({ select: { createdAt: true }, orderBy: { createdAt: "asc" } });
   const agentTotal = await prisma.agent.count();
+  // 数据新鲜度哨兵：最近一条 Span 的上报时间
+  const lastSpanAgg = await prisma.span.aggregate({ _max: { createdAt: true } });
+  const lastSpanAt = lastSpanAgg._max.createdAt ?? null;
 
   // 生成连续日序列（补 0）。startMs=0 时从最早数据日/最早注册日起
   let cursor: Date;
@@ -95,7 +100,7 @@ export async function getOverviewTrend(
       .filter((d): d is Date => d !== null)
       .sort((a, b) => a.getTime() - b.getTime());
     if (candidates.length === 0) {
-      return { series: [], cumulativeUsers: 0, agentTotal };
+      return { series: [], cumulativeUsers: 0, agentTotal, lastSpanAt };
     }
     cursor = candidates[0];
   }
@@ -129,5 +134,5 @@ export async function getOverviewTrend(
   }
 
   const cumulativeUsers = series.length > 0 ? series[series.length - 1].cumulativeUsers : userIdx;
-  return { series, cumulativeUsers, agentTotal };
+  return { series, cumulativeUsers, agentTotal, lastSpanAt };
 }

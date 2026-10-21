@@ -126,7 +126,7 @@ export default function AgentStatsPage() {
         }
       />
 
-      {/* Stats：性能向指标，与概览仪表盘错位（概览负责活跃度，这里负责性能与健康） */}
+      {/* Stats：性能向指标，与概览页错位（概览负责活跃度，这里负责性能与健康） */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <KpiCard
           label="总调用次数"

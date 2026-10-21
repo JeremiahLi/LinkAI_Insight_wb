@@ -21,7 +21,7 @@ const navGroups = [
   {
     label: "运营观测",
     items: [
-      { label: "概览仪表盘", href: "/", icon: LayoutDashboard },
+      { label: "概览", href: "/", icon: LayoutDashboard },
       { label: "链路追踪", href: "/trace", icon: Activity, matchPrefixes: ["/trace"] },
       { label: "业务数据看板", href: "/biz-stats", icon: TrendingUp, matchPrefixes: ["/biz-stats"] },
       { label: "Skill 使用看板", href: "/skill-stats", icon: Flame },

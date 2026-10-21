@@ -18,5 +18,9 @@ export async function GET(request: Request) {
         : 0;
 
   const data = await getOverviewTrend(prisma, startMs);
-  return NextResponse.json({ range, ...data });
+  return NextResponse.json({
+    range,
+    ...data,
+    lastSpanAt: data.lastSpanAt ? data.lastSpanAt.toISOString() : null,
+  });
 }

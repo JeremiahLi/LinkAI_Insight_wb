@@ -1,6 +1,6 @@
 /**
  * Agent 异常判定的统一口径。
- * 概览仪表盘的异常预警（/api/stats）与 Agent 性能看板的「异常 Agent」
+ * 概览页的异常预警（/api/stats）与 Agent 性能看板的「异常 Agent」
  * （/api/agents/stats）都必须走这里的同一套阈值，避免两处各算各的。
  */
 
