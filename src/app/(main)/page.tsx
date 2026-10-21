@@ -1,19 +1,19 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import Link from "next/link";
 import { AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader, SegmentedControl } from "@/components/shell/page-header";
-import { KpiCard } from "@/components/shell/kpi-card";
+import { Card, CardContent } from "@/components/ui/card";
 import { formatNumber, formatTokens } from "@/lib/format";
-import { OVERVIEW_RANGE_OPTIONS, type StatsRange } from "@/lib/engine/stats/range";
-import { Sparkline } from "@/components/charts/sparkline";
-import { AgentDetailPanel } from "@/components/agent/agent-detail-panel";
-import { useChartColors } from "@/lib/use-chart-colors";
+import { useChartColors, useCategoryPalette } from "@/lib/use-chart-colors";
 import {
   Area,
   AreaChart,
+  Bar,
+  BarChart,
+  Line,
+  LineChart,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -21,107 +21,141 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
-interface RealStats {
-  totalSessions: number;
-  totalTokens: number;
+/**
+ * 首页概览：异常栏 + 四张全局趋势图（用户 / 会话量 / Token / 活跃 Agent）。
+ * 趋势优先，单点数据只作图上锚点（末值 + 环比）；排行与实体下钻归各自看板。
+ */
+
+type TrendRange = "weekly" | "30d" | "all";
+
+const TREND_RANGE_OPTIONS: { value: TrendRange; label: string }[] = [
+  { value: "weekly", label: "近7天" },
+  { value: "30d", label: "近30天" },
+  { value: "all", label: "全部" },
+];
+
+interface OverviewPoint {
+  label: string;
+  date: string;
+  activeUsers: number;
   activeAgents: number;
-  prevTotalSessions?: number;
-  prevTotalTokens?: number;
-  prevActiveAgents?: number;
-  anomalies?: { type: string; severity: "critical" | "warning"; message: string; sessionIds?: string[] }[];
-  dailyTrend?: { label: string; tokens: number }[];
-}
-
-interface TopSession {
-  id: string;
+  sessions: number;
+  errorSessions: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheTokens: number;
   totalTokens: number;
-  totalDuration: number;
-  totalRounds: number;
-  totalSpans: number;
-  status: string;
-  model: string;
-  agentName: string;
-  agentEmoji: string;
-  startTime: string;
+  cumulativeUsers: number;
 }
 
-type TimeRange = Extract<StatsRange, "realtime" | "weekly">;
-
-/** 概览排行行点开的 Agent（详情面板所需的最小字段集） */
-interface SelectedAgent {
-  id: string;
-  name: string;
-  emoji: string;
-  description: string;
-  framework: string;
-  version: string;
-  calls: number;
-  successRate: number | null;
+interface OverviewData {
+  range: string;
+  series: OverviewPoint[];
+  cumulativeUsers: number;
+  agentTotal: number;
 }
 
-/** 列表行共用的等宽右对齐数字样式 */
-const numCell = "font-mono text-[13px] tabular-nums text-right";
+interface Anomaly {
+  type: string;
+  severity: "critical" | "warning";
+  message: string;
+  sessionIds?: string[];
+  details?: {
+    sessionId?: string;
+    agentName?: string;
+    tokens?: number;
+    excessPercent?: number;
+    errorRate?: number;
+  }[];
+}
+
+/** 锚点环比：与前一数据点比较，±5% 内视为持平 */
+function calcTrend(current: number, prev?: number) {
+  if (prev === undefined || prev === 0) return { percent: null as number | null, direction: "flat" as const };
+  const change = ((current - prev) / prev) * 100;
+  return {
+    percent: Math.abs(Math.round(change)),
+    direction: change > 5 ? ("up" as const) : change < -5 ? ("down" as const) : ("flat" as const),
+  };
+}
+
+function TrendText({ percent, direction }: { percent: number | null; direction: "up" | "down" | "flat" }) {
+  if (percent === null || direction === "flat") {
+    return <span className="text-xs text-muted-foreground">持平</span>;
+  }
+  const cls = direction === "up" ? "text-emerald-600 dark:text-emerald-400" : "text-destructive";
+  const sign = direction === "up" ? "+" : "-";
+  return (
+    <span className={`text-xs tabular-nums ${cls}`}>
+      {sign}
+      {percent}%
+    </span>
+  );
+}
+
+/** 趋势卡容器：标题 + 右上锚点 + 口径说明 + 图表区 */
+function TrendCard({
+  title,
+  caliber,
+  anchor,
+  anchorTrend,
+  height = 220,
+  children,
+}: {
+  title: string;
+  caliber: string;
+  anchor: ReactNode;
+  anchorTrend?: { percent: number | null; direction: "up" | "down" | "flat" };
+  height?: number;
+  children: ReactNode;
+}) {
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <div className="flex items-baseline justify-between gap-2">
+          <h3 className="text-[13px] font-medium">{title}</h3>
+          <div className="flex items-baseline gap-1.5 text-muted-foreground">{anchor}{anchorTrend && <TrendText percent={anchorTrend.percent} direction={anchorTrend.direction} />}</div>
+        </div>
+        <p className="mb-2 mt-0.5 text-[11px] text-muted-foreground/80">{caliber}</p>
+        <div style={{ height }}>
+          <ResponsiveContainer width="100%" height="100%">
+            {children as React.ReactElement}
+          </ResponsiveContainer>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function DashboardPage() {
-  const [timeRange, setTimeRange] = useState<TimeRange>("realtime");
-
-  const [realStats, setRealStats] = useState<RealStats | null>(null);
-  const [allStats, setAllStats] = useState<RealStats | null>(null);
-  const [topSessions, setTopSessions] = useState<TopSession[]>([]);
-  const [skillStats, setSkillStats] = useState<{ total: number; prevTotal: number }>({ total: 0, prevTotal: 0 });
-  const [agentStats, setAgentStats] = useState<SelectedAgent[]>([]);
-  const [skillStatsList, setSkillStatsList] = useState<{ name: string; calls: number }[]>([]);
-  /** 近 7 天逐日调用量（固定窗口，与上方时间切换解耦，供 sparkline 使用） */
-  const [trendSeries, setTrendSeries] = useState<{ name: string; data: number[] }[]>([]);
-  const [statsLoading, setStatsLoading] = useState(true);
-  const [alertsExpanded, setAlertsExpanded] = useState(true);
-  const [selectedAgent, setSelectedAgent] = useState<SelectedAgent | null>(null);
+  const [range, setRange] = useState<TrendRange>("weekly");
+  const [overview, setOverview] = useState<OverviewData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [anomalies, setAnomalies] = useState<Anomaly[]>([]);
+  const [alertsExpanded, setAlertsExpanded] = useState(false);
   const colors = useChartColors();
+  const palette = useCategoryPalette();
+
+  // 异常哨兵固定取实时档，不随趋势范围切换
+  useEffect(() => {
+    fetch("/api/stats?range=realtime")
+      .then((r) => r.json())
+      .then((d) => setAnomalies(d.anomalies ?? []))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
-    setStatsLoading(true);
-    Promise.all([
-      fetch(`/api/stats?range=${timeRange}`).then((r) => r.json()),
-      fetch("/api/stats?range=all").then((r) => r.json()),
-      fetch(`/api/sessions/top?range=${timeRange}`).then((r) => r.json()),
-      fetch(`/api/skills/stats?range=${timeRange}`).then((r) => r.json()),
-      fetch(`/api/agents/stats?range=${timeRange}`).then((r) => r.json()),
-      // sparkline 固定取近 7 天逐日趋势，不随时间切换抖动
-      fetch("/api/dashboard/agents/trend-compare?range=weekly&granularity=day&topN=30").then((r) => r.json()),
-    ])
-      .then(([rangeData, allData, topData, skillData, agentData, trendData]: [RealStats, RealStats, TopSession[], { total: number; prevTotal: number; skills: { name: string; calls: number }[] }, { agents: SelectedAgent[] }, { series: { name: string; data: number[] }[] }]) => {
-        setRealStats(rangeData);
-        setAllStats(allData);
-        setTopSessions(topData);
-        setSkillStats({ total: skillData.total, prevTotal: skillData.prevTotal });
-        setSkillStatsList(skillData.skills ?? []);
-        setAgentStats(agentData.agents ?? []);
-        setTrendSeries(trendData.series ?? []);
-        setStatsLoading(false);
-      })
-      .catch(() => setStatsLoading(false));
-  }, [timeRange]);
-
-  /** Agent 名称 -> 近 7 天逐日调用量 */
-  const trendMap = new Map(trendSeries.map((s) => [s.name, s.data]));
-
-  /** 排行只展示有调用的 Agent（与性能看板「调用量对比」同口径） */
-  const rankedAgents = agentStats.filter((a) => a.calls > 0).slice(0, 5);
-
-  // 点开详情：先展示已有统计，再异步补全 README（与性能看板点击行为一致）
-  const openAgentDetail = (agent: SelectedAgent) => {
-    setSelectedAgent(agent);
-    fetch(`/api/agents/${encodeURIComponent(agent.name)}`)
+    setLoading(true);
+    fetch(`/api/dashboard/overview?range=${range}`)
       .then((r) => r.json())
-      .then((data) => {
-        setSelectedAgent((prev) =>
-          prev && prev.id === agent.id ? { ...prev, readme: data.readme || "" } : prev,
-        );
+      .then((d: OverviewData) => {
+        setOverview(d);
+        setLoading(false);
       })
-      .catch(() => {});
-  };
+      .catch(() => setLoading(false));
+  }, [range]);
 
-  if (statsLoading || !realStats || !allStats) {
+  if (loading || !overview) {
     return (
       <div className="flex h-[calc(100vh-56px)] items-center justify-center">
         <p className="text-sm text-muted-foreground">加载中...</p>
@@ -129,226 +163,184 @@ export default function DashboardPage() {
     );
   }
 
-  const stats = realStats;
+  const series = overview.series;
+  const last = series.length > 0 ? series[series.length - 1] : null;
+  const prev = series.length > 1 ? series[series.length - 2] : undefined;
 
-  const calcTrend = (current: number, prev?: number) => {
-    if (!prev || prev === 0) return { value: 0, direction: "flat" as const };
-    const change = ((current - prev) / prev) * 100;
-    return {
-      value: Math.abs(change),
-      direction: change > 5 ? "up" as const : change < -5 ? "down" as const : "flat" as const,
-    };
-  };
+  /** 图表数据：派生正常会话数 = 总数 - 失败数（供堆叠柱使用） */
+  const chartSeries = series.map((p) => ({ ...p, okSessions: p.sessions - p.errorSessions }));
 
-  const isRealtime = timeRange === "realtime";
-  const hasCritical = stats.anomalies?.some((a) => a.severity === "critical") ?? false;
-  const criticalCount = stats.anomalies?.filter((a) => a.severity === "critical").length ?? 0;
-  const warningCount = stats.anomalies?.filter((a) => a.severity === "warning").length ?? 0;
+  const criticalCount = anomalies.filter((a) => a.severity === "critical").length;
+  const warningCount = anomalies.filter((a) => a.severity === "warning").length;
+
+  const anchorNum = (value: number | undefined) => (
+    <span className="text-sm font-medium text-foreground tabular-nums">{value === undefined ? "-" : formatNumber(value)}</span>
+  );
+
+  const tooltipStyle = {
+    backgroundColor: "var(--popover)",
+    border: "1px solid var(--border)",
+    borderRadius: 6,
+    fontSize: 12,
+    color: colors.text,
+  } as const;
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex flex-col gap-5 p-6">
       <PageHeader
-        title="概览仪表盘"
-        description={isRealtime ? "实时运行状态监控" : "Agent 市场近 7 天运行情况"}
-        actions={
-          <SegmentedControl
-            options={OVERVIEW_RANGE_OPTIONS}
-            value={timeRange}
-            onChange={setTimeRange}
-          />
-        }
+        title="仪表盘概览"
+        description="平台全局运行趋势 · 单点数据仅作图上锚点"
+        actions={<SegmentedControl options={TREND_RANGE_OPTIONS} value={range} onChange={setRange} />}
       />
 
-      {/* 核心指标：大数字 + 紧凑标签 */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <KpiCard label="活跃 Agent" value={String(stats.activeAgents)} sub={isRealtime ? "今日运行中" : "本周活跃"} trend={calcTrend(stats.activeAgents, stats.prevActiveAgents)} />
-        <KpiCard label="Skill 调用" value={formatNumber(skillStats.total)} sub={isRealtime ? "今日累计" : "本周累计"} trend={calcTrend(skillStats.total, skillStats.prevTotal)} />
-        <KpiCard label="Session 总数" value={String(stats.totalSessions)} sub={isRealtime ? "今日新增" : "本周新增"} trend={calcTrend(stats.totalSessions, stats.prevTotalSessions)} />
-        <KpiCard label="Token 消耗" value={formatTokens(stats.totalTokens)} sub={isRealtime ? "今日累计" : "本周累计"} trend={calcTrend(stats.totalTokens, stats.prevTotalTokens)} />
-      </div>
-
-      {/* 异常预警：语义色只做状态提示 */}
-      {stats.anomalies && stats.anomalies.length > 0 && (
-        <div className={cnAlert(hasCritical)}>
+      {/* 异常栏：唯一的"现在时"信息，固定反映实时异常 */}
+      {anomalies.length > 0 && (
+        <div className="rounded-lg bg-destructive/5 px-4 py-3 ring-1 ring-destructive/25">
           <button
             onClick={() => setAlertsExpanded(!alertsExpanded)}
             className="flex w-full items-center justify-between gap-2 text-left"
           >
             <span className="flex items-center gap-2 text-[13px] font-medium">
-              <AlertTriangle className={`h-3.5 w-3.5 ${hasCritical ? "text-destructive" : "text-warning"}`} />
+              <AlertTriangle className="h-3.5 w-3.5 text-destructive" />
               {criticalCount > 0 && <span className="text-destructive tabular-nums">{criticalCount} 项严重异常</span>}
               {criticalCount > 0 && warningCount > 0 && <span className="text-muted-foreground">·</span>}
               {warningCount > 0 && <span className="text-warning tabular-nums">{warningCount} 项警告</span>}
             </span>
-            {alertsExpanded ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />}
+            <span className="flex items-center gap-2">
+              <Link
+                href="/alerts"
+                className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+                onClick={(e) => e.stopPropagation()}
+              >
+                告警中心 →
+              </Link>
+              {alertsExpanded ? (
+                <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" />
+              ) : (
+                <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+              )}
+            </span>
           </button>
           {alertsExpanded && (
             <div className="mt-2 space-y-1.5 border-t border-border/60 pt-2">
-              {stats.anomalies.slice(0, 5).map((a, i) => (
+              {anomalies.slice(0, 5).map((a, i) => (
                 <AnomalyItem key={i} anomaly={a} />
               ))}
-              {stats.anomalies.length > 5 && (
-                <p className="pl-4 text-xs text-muted-foreground tabular-nums">还有 {stats.anomalies.length - 5} 项异常…</p>
+              {anomalies.length > 5 && (
+                <p className="pl-4 text-xs text-muted-foreground tabular-nums">还有 {anomalies.length - 5} 项异常…</p>
               )}
             </div>
           )}
         </div>
       )}
 
-      {/* 主区域：Agent / Skill / Session 三列排行 */}
-      <div className="grid gap-4 lg:grid-cols-3">
-        {/* Agent 排行：行内 sparkline 展示近 7 天趋势，点击行直接下钻单 Agent 详情 */}
-        <Card className="h-full">
-          <CardHeader className="flex-row items-center justify-between border-b border-border/60 pb-2.5">
-            <CardTitle>Agent 调用排行</CardTitle>
-            <Link href="/agent-stats" className="text-xs text-muted-foreground transition-colors hover:text-foreground">
-              全部 →
-            </Link>
-          </CardHeader>
-          <CardContent className="pt-3">
-            <div className="grid grid-cols-[16px_1fr_44px_80px] gap-x-2 pb-1.5 text-[11px] font-medium text-muted-foreground">
-              <span />
-              <span>名称</span>
-              <span className="text-right">调用</span>
-              <span className="text-right">近7天趋势</span>
-            </div>
-            <div className="divide-y divide-border/50">
-              {rankedAgents.map((agent, i) => (
-                <button
-                  key={agent.id}
-                  onClick={() => openAgentDetail(agent)}
-                  className="grid h-8 w-full grid-cols-[16px_1fr_44px_80px] items-center gap-x-2 text-left transition-colors hover:bg-muted/40"
-                >
-                  <span className="font-mono text-xs text-muted-foreground/60 tabular-nums">{i + 1}</span>
-                  <span className="truncate text-[13px]">{agent.name}</span>
-                  <span className={numCell}>{formatNumber(agent.calls)}</span>
-                  <span className="flex justify-end">
-                    <Sparkline data={trendMap.get(agent.name) ?? []} />
-                  </span>
-                </button>
-              ))}
-              {rankedAgents.length === 0 && <EmptyRow colSpan={4} />}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Skill 排行 */}
-        <Link href="/skill-stats" className="block">
-          <Card className="h-full cursor-pointer transition-colors hover:ring-foreground/25">
-            <CardHeader className="border-b border-border/60 pb-2.5">
-              <CardTitle>Skill 调用排行</CardTitle>
-            </CardHeader>
-            <CardContent className="pt-3">
-              <div className="grid grid-cols-[16px_1fr_56px] gap-x-2 pb-1.5 text-[11px] font-medium text-muted-foreground">
-                <span />
-                <span>名称</span>
-                <span className="text-right">调用</span>
-              </div>
-              <div className="divide-y divide-border/50">
-                {skillStatsList.slice(0, 5).map((skill, i) => (
-                  <div key={skill.name} className="grid h-8 grid-cols-[16px_1fr_56px] items-center gap-x-2">
-                    <span className="font-mono text-xs text-muted-foreground/60 tabular-nums">{i + 1}</span>
-                    <span className="truncate text-[13px]">{skill.name}</span>
-                    <span className={numCell}>{formatNumber(skill.calls)}</span>
-                  </div>
-                ))}
-                {skillStatsList.length === 0 && <EmptyRow colSpan={3} />}
-              </div>
-            </CardContent>
-          </Card>
-        </Link>
-
-        {/* Session 排行 */}
-        <Link href="/trace" className="block">
-          <Card className="h-full cursor-pointer transition-colors hover:ring-foreground/25">
-            <CardHeader className="border-b border-border/60 pb-2.5">
-              <CardTitle>Session Token 消耗</CardTitle>
-            </CardHeader>
-            <CardContent className="pt-3">
-              <div className="grid grid-cols-[16px_1fr_56px] gap-x-2 pb-1.5 text-[11px] font-medium text-muted-foreground">
-                <span />
-                <span>会话 / Agent</span>
-                <span className="text-right">Token</span>
-              </div>
-              <div className="divide-y divide-border/50">
-                {topSessions.map((s, i) => (
-                  <div key={s.id} className="grid h-8 grid-cols-[16px_1fr_56px] items-center gap-x-2">
-                    <span className="font-mono text-xs text-muted-foreground/60 tabular-nums">{i + 1}</span>
-                    <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
-                      <span className="font-mono text-xs text-muted-foreground">{s.id.slice(-6)}</span>
-                      <span className="truncate text-muted-foreground">{s.agentName}</span>
-                    </div>
-                    <span className={numCell}>{formatTokens(s.totalTokens)}</span>
-                  </div>
-                ))}
-                {topSessions.length === 0 && <EmptyRow colSpan={3} />}
-              </div>
-            </CardContent>
-          </Card>
-        </Link>
-      </div>
-
-      {/* 近 7 天视图：Token 消耗趋势 */}
-      {!isRealtime && (
+      {/* 四张全局趋势图 */}
+      {series.length === 0 ? (
         <Card>
-          <CardHeader className="border-b border-border/60 pb-2.5">
-            <CardTitle>Token 消耗趋势</CardTitle>
-          </CardHeader>
-          <CardContent className="pt-4">
-            <div className="h-56">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={stats.dailyTrend ?? []} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="tokenGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={colors.areaStroke} stopOpacity={0.25} />
-                      <stop offset="100%" stopColor={colors.areaStroke} stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke={colors.grid} vertical={false} />
-                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
-                  <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} tickFormatter={(v) => formatTokens(v)} width={48} />
-                  <Tooltip
-                    formatter={(value) => [formatTokens(value as number), "Token"]}
-                    contentStyle={{ backgroundColor: "var(--popover)", border: "1px solid var(--border)", borderRadius: 6, fontSize: 12, color: colors.text }}
-                    labelStyle={{ fontSize: 11, color: colors.text }}
-                  />
-                  <Area type="monotone" dataKey="tokens" stroke={colors.areaStroke} fill="url(#tokenGradient)" strokeWidth={1.5} />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
+          <CardContent className="flex h-64 items-center justify-center">
+            <p className="text-sm text-muted-foreground">暂无数据</p>
           </CardContent>
         </Card>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {/* 用户趋势：活跃用户 + 累计注册 */}
+          <TrendCard
+            title="用户趋势"
+            caliber="每日活跃用户（实线）· 累计注册用户（虚线）"
+            anchor={
+              last && (
+                <>
+                  <span className="text-xs">今日活跃 {anchorNum(last.activeUsers)}</span>
+                  <span className="text-xs text-muted-foreground">/ 累计 {formatNumber(last.cumulativeUsers)}</span>
+                </>
+              )
+            }
+            anchorTrend={calcTrend(last?.activeUsers ?? 0, prev?.activeUsers)}
+          >
+            <LineChart data={series} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke={colors.grid} vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={36} allowDecimals={false} />
+              <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} />
+              <Line type="monotone" dataKey="activeUsers" name="活跃用户" stroke={colors.areaStroke} strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="cumulativeUsers" name="累计注册" stroke={palette[4]} strokeWidth={1.5} strokeDasharray="5 3" dot={false} />
+            </LineChart>
+          </TrendCard>
+
+          {/* 会话量趋势：新增会话 + 失败叠红 */}
+          <TrendCard
+            title="会话量趋势"
+            caliber="每日新增会话（蓝）· 其中失败会话（红，堆叠）"
+            anchor={last && <span className="text-xs">今日新增 {anchorNum(last.sessions)}</span>}
+            anchorTrend={calcTrend(last?.sessions ?? 0, prev?.sessions)}
+          >
+            <BarChart data={chartSeries} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke={colors.grid} vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={36} allowDecimals={false} />
+              <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} />
+              <Bar dataKey="okSessions" name="正常会话" stackId="s" fill={palette[0]} />
+              <Bar dataKey="errorSessions" name="失败会话" stackId="s" fill={palette[4]} radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </TrendCard>
+
+          {/* Token 消耗趋势：输入/输出/cache 三段堆叠 */}
+          <TrendCard
+            title="Token 消耗趋势"
+            caliber="每日消耗按 输入 / 输出 / cache 堆叠"
+            anchor={last && <span className="text-xs">今日消耗 <span className="text-sm font-medium text-foreground tabular-nums">{formatTokens(last.totalTokens)}</span></span>}
+            anchorTrend={calcTrend(last?.totalTokens ?? 0, prev?.totalTokens)}
+          >
+            <BarChart data={series} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+              <CartesianGrid stroke={colors.grid} vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={48} tickFormatter={(v) => formatTokens(Number(v))} />
+              <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} formatter={(v) => formatTokens(Number(v))} />
+              <Bar dataKey="inputTokens" name="输入" stackId="t" fill={palette[0]} />
+              <Bar dataKey="outputTokens" name="输出" stackId="t" fill={palette[2]} />
+              <Bar dataKey="cacheTokens" name="Cache" stackId="t" fill={palette[1]} radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </TrendCard>
+
+          {/* 活跃 Agent 趋势 */}
+          <TrendCard
+            title="活跃 Agent 趋势"
+            caliber="每日有调用的 Agent 数（去重）"
+            anchor={
+              last && (
+                <>
+                  <span className="text-xs">今日 {anchorNum(last.activeAgents)}</span>
+                  <span className="text-xs text-muted-foreground">/ 共 {formatNumber(overview.agentTotal)}</span>
+                </>
+              )
+            }
+            anchorTrend={calcTrend(last?.activeAgents ?? 0, prev?.activeAgents)}
+          >
+            <AreaChart data={series} margin={{ top: 5, right: 8, left: 0, bottom: 0 }}>
+              <defs>
+                <linearGradient id="overviewAgentGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={colors.areaStroke} stopOpacity={0.25} />
+                  <stop offset="100%" stopColor={colors.areaStroke} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke={colors.grid} vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} interval="preserveStartEnd" tickLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: colors.text }} stroke={colors.grid} tickLine={false} width={36} allowDecimals={false} />
+              <Tooltip contentStyle={tooltipStyle} labelStyle={{ fontSize: 11, color: colors.text }} />
+              <Area type="monotone" dataKey="activeAgents" name="活跃 Agent" stroke={colors.areaStroke} fill="url(#overviewAgentGradient)" strokeWidth={2} />
+            </AreaChart>
+          </TrendCard>
+        </div>
       )}
 
-      {/* 单 Agent 详情面板：从排行行直接下钻 */}
-      <AgentDetailPanel
-        agent={selectedAgent ? { ...selectedAgent, readme: "" } : null}
-        open={selectedAgent !== null}
-        onClose={() => setSelectedAgent(null)}
-        timeRange={timeRange}
-      />
+      <p className="text-[11px] text-muted-foreground/70">
+        锚点为所选范围最后一天的值及较前一日的环比；活跃用户 / 活跃 Agent 按当日去重计数。排行与单实体分析见 Agent / Session / Skill 看板。
+      </p>
     </div>
   );
 }
 
-function EmptyRow({ colSpan }: { colSpan: number }) {
-  return (
-    <div className="flex h-8 items-center" style={{ gridColumn: `span ${colSpan}` }}>
-      <p className="w-full text-center text-xs text-muted-foreground">暂无数据</p>
-    </div>
-  );
-}
-
-function cnAlert(hasCritical: boolean) {
-  return [
-    "rounded-lg px-4 py-3 ring-1",
-    hasCritical
-      ? "bg-destructive/5 ring-destructive/25"
-      : "bg-warning/5 ring-warning/25",
-  ].join(" ");
-}
-
-function AnomalyItem({ anomaly }: { anomaly: { type: string; severity: "critical" | "warning"; message: string; details?: { sessionId?: string; agentName?: string; tokens?: number; excessPercent?: number; errorRate?: number }[] } }) {
+function AnomalyItem({ anomaly }: { anomaly: Anomaly }) {
   const [expanded, setExpanded] = useState(false);
   const hasDetails = anomaly.details && anomaly.details.length > 0;
 
