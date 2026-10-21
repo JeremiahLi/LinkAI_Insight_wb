@@ -143,11 +143,15 @@ export interface AgentsTrendCompare {
   series: { name: string; data: number[] }[];
 }
 
+/** 对比曲线的指标维度 */
+export type AgentTrendMetric = "sessions" | "tokens" | "failed";
+
 export async function getAgentsTrendCompare(
   prisma: PrismaClient,
   startMs: number,
   granularity: TrendGranularity,
   topN = 8,
+  metric: AgentTrendMetric = "sessions",
 ): Promise<AgentsTrendCompare> {
   const bucketExpr =
     granularity === "week"
@@ -157,7 +161,9 @@ export async function getAgentsTrendCompare(
   const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
     SELECT ${bucketExpr} AS bucket,
            a.name AS agent,
-           COUNT(*) AS sessions
+           COUNT(*) AS sessions,
+           COALESCE(SUM(s.totalTokens), 0) AS tokens,
+           COALESCE(SUM(CASE WHEN s.errorCount > 0 OR s.status = 'error' THEN 1 ELSE 0 END), 0) AS failed
     FROM Session s
     JOIN Agent a ON s.agentId = a.id
     WHERE s.startTime >= ${startMs}
@@ -165,15 +171,21 @@ export async function getAgentsTrendCompare(
     ORDER BY bucket
   `;
 
-  type BucketRow = { bucket: string; agent: string; sessions: number };
+  type BucketRow = { bucket: string; agent: string; sessions: number; tokens: number; failed: number };
   const parsed = rows.map((raw) => {
     const r = normalizeRow(raw);
-    return { bucket: String(r.bucket), agent: String(r.agent), sessions: Number(r.sessions) };
+    return {
+      bucket: String(r.bucket),
+      agent: String(r.agent),
+      sessions: Number(r.sessions),
+      tokens: Number(r.tokens),
+      failed: Number(r.failed),
+    };
   });
 
-  // 按 Agent 总量取 Top N
+  // 按所选指标取 Top N（不能固定按会话数，否则切 Token 时 Token 最高的 Agent 会缺席）
   const totals = new Map<string, number>();
-  for (const row of parsed) totals.set(row.agent, (totals.get(row.agent) ?? 0) + row.sessions);
+  for (const row of parsed) totals.set(row.agent, (totals.get(row.agent) ?? 0) + row[metric]);
   const topAgents = Array.from(totals.entries())
     .sort((a, b) => b[1] - a[1])
     .slice(0, topN)
@@ -188,11 +200,11 @@ export async function getAgentsTrendCompare(
     buckets = Array.from(new Set(parsed.map((r) => r.bucket))).sort();
   }
 
-  // bucket+agent -> sessions
+  // bucket+agent -> value
   const valueMap = new Map<string, number>();
   for (const row of parsed) {
     if (!topSet.has(row.agent)) continue;
-    valueMap.set(`${row.bucket}|${row.agent}`, row.sessions);
+    valueMap.set(`${row.bucket}|${row.agent}`, row[metric]);
   }
 
   const labels = buckets.map((b) => toLabel(b, granularity));
@@ -204,9 +216,26 @@ export async function getAgentsTrendCompare(
   return { labels, series };
 }
 
+/**
+ * 供其他模块复用的桶序列构造：日粒度补零到「今天」，周粒度取实际出现过的周。
+ * 单 Agent 下钻的趋势图与看板必须用同一套桶，否则同一天的柱子对不齐。
+ */
+export function buildBucketKeys(
+  granularity: TrendGranularity,
+  observed: string[],
+  startMs: number,
+): string[] {
+  if (granularity === "day") return buildDayBuckets(observed, startMs);
+  return Array.from(new Set(observed)).sort();
+}
+
+/** bucket → 展示用标签（10/13 或 W41） */
+export function bucketLabel(bucket: string, granularity: TrendGranularity): string {
+  return toLabel(bucket, granularity);
+}
+
 /** 生成日粒度桶序列（补零用），bucketsFromDb 用于 all 范围时推断起点 */
-function buildDayBuckets(bucketsFromDb: string[], startMs: number): string[] {
-  const out: string[] = [];
+function buildDayBuckets(bucketsFromDb: string[], startMs: number): string[] {  const out: string[] = [];
   let cursor: Date;
   if (startMs > 0) {
     cursor = new Date(startMs);

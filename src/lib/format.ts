@@ -48,3 +48,20 @@ export function formatDateTime(timestamp: number): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
+
+export interface PctChange {
+  value: number;
+  direction: "up" | "down" | "flat";
+}
+
+/**
+ * 环比变化：|变化| < 1% 视为持平；上期为 0 或无上期时返回 undefined（不画趋势箭头，
+ * 避免把「从 0 到有」渲染成 +∞%）。
+ */
+export function pctChange(cur: number, prev: number | null | undefined): PctChange | undefined {
+  if (prev == null || prev === 0) return undefined;
+  const diff = ((cur - prev) / prev) * 100;
+  if (Math.abs(diff) < 1) return { value: 0, direction: "flat" };
+  return { value: Math.abs(diff), direction: diff > 0 ? "up" : "down" };
+}
+

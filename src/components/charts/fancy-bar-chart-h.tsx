@@ -23,10 +23,16 @@ export function FancyBarChartH({
   data,
   valueFormatter,
   ariaLabel,
+  yAxisInterval,
 }: {
   data: { name: string; value: number }[];
   valueFormatter: (v: number) => string;
   ariaLabel?: string;
+  /**
+   * Y 轴类目标签的显示间隔。recharts 默认自动抽稀，卡片较矮时会隔一个漏一个，
+   * 看起来像"某几根柱子没有名字"。行数固定且不多时传 0 强制全显示。
+   */
+  yAxisInterval?: number;
 }) {
   const colors = useChartColors();
   const palette = useCategoryPalette();
@@ -43,6 +49,7 @@ export function FancyBarChartH({
           axisLine={false}
           tickLine={false}
           width={160}
+          interval={yAxisInterval}
         />
         <Tooltip
           cursor={{ fill: colors.grid, opacity: 0.4 }}

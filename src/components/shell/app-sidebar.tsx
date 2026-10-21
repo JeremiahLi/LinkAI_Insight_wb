@@ -25,10 +25,10 @@ const navGroups = [
     items: [
       { label: "概览", href: "/", icon: LayoutDashboard },
       { label: "用户看板", href: "/user-stats", icon: Users, matchPrefixes: ["/user-stats"] },
+      { label: "Agent 看板", href: "/agent-board", icon: Bot, matchPrefixes: ["/agent-board"] },
       { label: "链路追踪", href: "/trace", icon: Activity, matchPrefixes: ["/trace"] },
       { label: "业务数据看板", href: "/biz-stats", icon: TrendingUp, matchPrefixes: ["/biz-stats"] },
       { label: "Skill 使用看板", href: "/skill-stats", icon: Flame },
-      { label: "Agent 性能看板", href: "/agent-stats", icon: Bot },
     ],
   },
   {

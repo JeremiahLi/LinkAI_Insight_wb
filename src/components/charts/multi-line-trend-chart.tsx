@@ -27,10 +27,13 @@ export function MultiLineTrendChart({
   labels,
   series,
   height = 220,
+  valueFormatter,
 }: {
   labels: string[];
   series: MultiLineSeries[];
   height?: number;
+  /** Y 轴与 Tooltip 的数值格式化（Token 这类大数必须传，否则刻度显示原始整数） */
+  valueFormatter?: (v: number) => string;
 }) {
   const colors = useChartColors();
   const palette = useCategoryPalette();
@@ -60,8 +63,9 @@ export function MultiLineTrendChart({
           tick={{ fontSize: 11, fill: colors.text }}
           axisLine={false}
           tickLine={false}
-          width={40}
+          width={44}
           allowDecimals={false}
+          tickFormatter={valueFormatter}
         />
         <Tooltip
           contentStyle={{
@@ -71,6 +75,7 @@ export function MultiLineTrendChart({
             fontSize: "12px",
             color: colors.text,
           }}
+          formatter={valueFormatter ? (v) => valueFormatter(Number(v)) : undefined}
         />
         <Legend
           wrapperStyle={{ fontSize: 12, cursor: "default" }}
