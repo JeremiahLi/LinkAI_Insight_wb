@@ -41,6 +41,24 @@ export async function GET() {
     },
   });
 
+  /**
+   * 会话实际调用过的模型（Span 粒度）。
+   * Session.model 只有一个值且有 22/231 为空，LLM 看板跳转 /trace?model=xxx 必须靠这份
+   * 集合才准确（跨模型会话只有 4 个，但漏掉就会少算）。
+   * 一次 groupBy 拿全量，随 /api/sessions 一起返回，避免前端再发一轮请求。
+   */
+  const modelGroups = await prisma.span.groupBy({
+    by: ["sessionId", "model"],
+    where: { kind: "llm_thinking" },
+  });
+  const modelsBySession = new Map<string, Set<string>>();
+  for (const g of modelGroups) {
+    if (!g.model) continue;
+    const set = modelsBySession.get(g.sessionId) ?? new Set<string>();
+    set.add(g.model);
+    modelsBySession.set(g.sessionId, set);
+  }
+
   const result = sessions.map((s) => ({
     id: s.id,
     projectId: s.projectId,
@@ -55,6 +73,8 @@ export async function GET() {
     title: s.title,
     outcome: s.outcome,
     model: s.model,
+    /** 该会话实际调用过的模型（去重，来自 llm_thinking span） */
+    models: Array.from(modelsBySession.get(s.id) ?? []).sort(),
     startTime: s.startTime,
     totalRounds: s.totalRounds,
     totalSpans: s.totalSpans,

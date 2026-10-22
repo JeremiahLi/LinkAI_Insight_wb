@@ -10,11 +10,12 @@ import {
   Gauge,
   Bell,
   Settings,
-  Flame,
   Bot,
   TrendingUp,
   Users,
   Search,
+  Cpu,
+  Wrench,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "./theme-toggle";
@@ -27,8 +28,15 @@ const navGroups = [
       { label: "用户看板", href: "/user-stats", icon: Users, matchPrefixes: ["/user-stats"] },
       { label: "Agent 看板", href: "/agent-board", icon: Bot, matchPrefixes: ["/agent-board"] },
       { label: "Session 看板", href: "/trace", icon: Activity, matchPrefixes: ["/trace"], keywords: ["链路", "追踪", "trace", "会话"] },
+      { label: "LLM 看板", href: "/llm", icon: Cpu, matchPrefixes: ["/llm"], keywords: ["模型", "成本", "缓存", "token", "llm"] },
+      {
+        label: "Tool & Skill 看板",
+        href: "/skills",
+        icon: Wrench,
+        matchPrefixes: ["/skills"],
+        keywords: ["工具", "skill", "技能", "tool", "调用", "失败"],
+      },
       { label: "业务数据看板", href: "/biz-stats", icon: TrendingUp, matchPrefixes: ["/biz-stats"] },
-      { label: "Skill 使用看板", href: "/skill-stats", icon: Flame },
     ],
   },
   {

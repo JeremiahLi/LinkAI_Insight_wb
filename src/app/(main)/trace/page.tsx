@@ -64,6 +64,8 @@ interface SessionItem {
   /** success / partial / failed / 空串=未知 */
   outcome: string;
   model: string;
+  /** 该会话实际调用过的模型（来自 llm_thinking span，可能多个） */
+  models: string[];
   startTime: string;
   totalRounds: number;
   totalSpans: number;
@@ -120,6 +122,15 @@ export default function SessionBoardPage() {
   const [search, setSearch] = useState("");
   const [agentFilter, setAgentFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  /** 模型过滤：LLM 看板点模型跳过来时带 ?model=xxx */
+  const [modelFilter, setModelFilter] = useState("all");
+  /**
+   * 标签过滤：Tool & Skill 看板点工具/Skill 跳过来时带 ?tool=xxx / ?skill=xxx。
+   * 会话本身没有这两个维度，需要向 /api/sessions/by-tag 反查命中的会话 id 集合。
+   */
+  const [tagFilter, setTagFilter] = useState<{ type: "skill" | "tool"; name: string } | null>(null);
+  const [tagIds, setTagIds] = useState<Set<string> | null>(null);
+  const [tagInfo, setTagInfo] = useState<{ calls: number; range: string } | null>(null);
   const [page, setPage] = useState(1);
   const [errorsOnly, setErrorsOnly] = useState(false);
   const [sortMode, setSortMode] = useState<"time" | "anomaly">("time");
@@ -138,6 +149,14 @@ export default function SessionBoardPage() {
         const params = new URLSearchParams(window.location.search);
         const sessionParam = params.get("session");
         if (sessionParam) setSearch(sessionParam);
+        // LLM 看板点模型跳过来：?model=xxx 直接落到该模型的会话
+        const modelParam = params.get("model");
+        if (modelParam) setModelFilter(modelParam);
+        // Tool & Skill 看板点工具/Skill 跳过来：?tool=xxx / ?skill=xxx
+        const skillParam = params.get("skill");
+        const toolParam = params.get("tool");
+        if (skillParam) setTagFilter({ type: "skill", name: skillParam });
+        else if (toolParam) setTagFilter({ type: "tool", name: toolParam });
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -169,6 +188,34 @@ export default function SessionBoardPage() {
     loadBoard();
   }, [loadBoard]);
 
+  /* ---------------------- 标签下钻（?skill= / ?tool=） ---------------------- */
+
+  // 自定义区间不传 from/to 给反查接口（按 all 取超集），收窄交给本页自己的时间窗过滤
+  const tagRange: string = range === "custom" ? "all" : range;
+
+  useEffect(() => {
+    if (!tagFilter) {
+      setTagIds(null);
+      setTagInfo(null);
+      return;
+    }
+    let cancelled = false;
+    const qs = `type=${tagFilter.type}&name=${encodeURIComponent(tagFilter.name)}&range=${tagRange}`;
+    fetch(`/api/sessions/by-tag?${qs}`)
+      .then((res) => res.json())
+      .then((d: { sessionIds?: string[]; calls?: number; range?: string; error?: string }) => {
+        if (cancelled) return;
+        setTagIds(new Set(d.sessionIds ?? []));
+        setTagInfo({ calls: d.calls ?? 0, range: d.range ?? "" });
+      })
+      .catch(() => {
+        if (!cancelled) setTagIds(new Set());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tagFilter, tagRange]);
+
   /* ---------------------------- 表格筛选 ---------------------------- */
 
   const windowStart = board?.windowStartMs ?? 0;
@@ -195,6 +242,13 @@ export default function SessionBoardPage() {
       );
     }
     if (agentFilter !== "all") result = result.filter((s) => s.agentId === agentFilter);
+    // 按 Span 粒度统计的模型集合过滤：Session.model 只有一个值且可能为空，
+    // 直接从 LLM 看板跳过来会漏掉「多模型会话」
+    if (modelFilter !== "all") {
+      result = result.filter((s) => (s.models ?? []).includes(modelFilter));
+    }
+    // Tool & Skill 看板下钻：只保留命中该工具/Skill 的会话
+    if (tagIds) result = result.filter((s) => tagIds.has(s.id));
     if (statusFilter !== "all") {
       // 按终态筛选：success/partial/failed 走 outcome，active 走 status
       result =
@@ -225,6 +279,8 @@ export default function SessionBoardPage() {
     search,
     agentFilter,
     statusFilter,
+    modelFilter,
+    tagIds,
     errorsOnly,
     sortMode,
   ]);
@@ -271,6 +327,15 @@ export default function SessionBoardPage() {
     const map = new Map<string, string>();
     for (const s of sessions) map.set(s.agentId, s.agentName);
     return Array.from(map.entries());
+  }, [sessions]);
+
+  /** 模型选项：按使用该模型的会话数降序，空模型名不上榜 */
+  const modelOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const s of sessions) {
+      for (const m of s.models ?? []) counts.set(m, (counts.get(m) ?? 0) + 1);
+    }
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   }, [sessions]);
 
   const handleDelete = async (sessionId: string) => {
@@ -651,7 +716,13 @@ export default function SessionBoardPage() {
           }}
         >
           <SelectTrigger className="h-8 w-[140px]">
-            <SelectValue />
+            <SelectValue>
+              {(v) =>
+                v === "all" || !v
+                  ? "全部 Agent"
+                  : (agentOptions.find(([id]) => id === v)?.[1] ?? String(v))
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部 Agent</SelectItem>
@@ -670,7 +741,16 @@ export default function SessionBoardPage() {
           }}
         >
           <SelectTrigger className="h-8 w-[120px]">
-            <SelectValue />
+            <SelectValue>
+              {(v) =>
+                v === "all" || !v
+                  ? "全部状态"
+                  : ({ active: "进行中", success: "成功", partial: "部分成功", failed: "失败" } as Record<
+                      string,
+                      string
+                    >)[String(v)] ?? String(v)
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部状态</SelectItem>
@@ -680,6 +760,56 @@ export default function SessionBoardPage() {
             <SelectItem value="failed">失败</SelectItem>
           </SelectContent>
         </Select>
+        <Select
+          value={modelFilter}
+          onValueChange={(v) => {
+            setModelFilter(v ?? "all");
+            setPage(1);
+          }}
+        >
+          <SelectTrigger className="h-8 w-[160px]">
+            <SelectValue>
+              {(v) => (v === "all" || !v ? "全部模型" : String(v))}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">全部模型</SelectItem>
+            {modelOptions.map(([name, count]) => (
+              <SelectItem key={name} value={name}>
+                {name}（{count}）
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {tagFilter ? (
+          <span className="flex h-8 items-center gap-1.5 rounded-md bg-primary/10 pl-2.5 pr-1.5 text-xs text-primary ring-1 ring-primary/30">
+            <span className="truncate">
+              {tagFilter.type === "skill" ? "Skill" : "Tool"}：{tagFilter.name}
+            </span>
+            <span className="shrink-0 font-mono text-[11px] tabular-nums text-primary/80">
+              {tagIds
+                ? `${tagIds.size} 会话${tagInfo && tagInfo.calls > 0 ? ` · ${tagInfo.calls} 次调用` : ""}`
+                : "查询中…"}
+            </span>
+            <button
+              type="button"
+              aria-label="清除工具/Skill 筛选"
+              onClick={() => {
+                setTagFilter(null);
+                setTagIds(null);
+                setTagInfo(null);
+                setPage(1);
+                const url = new URL(window.location.href);
+                url.searchParams.delete("skill");
+                url.searchParams.delete("tool");
+                window.history.replaceState({}, "", url.toString());
+              }}
+              className="flex h-5 w-5 items-center justify-center rounded text-primary/70 transition-colors hover:bg-primary/15 hover:text-primary"
+            >
+              ×
+            </button>
+          </span>
+        ) : null}
         <button
           onClick={() => {
             setErrorsOnly((v) => !v);
