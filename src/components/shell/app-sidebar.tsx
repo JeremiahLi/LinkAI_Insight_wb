@@ -26,7 +26,7 @@ const navGroups = [
       { label: "概览", href: "/", icon: LayoutDashboard },
       { label: "用户看板", href: "/user-stats", icon: Users, matchPrefixes: ["/user-stats"] },
       { label: "Agent 看板", href: "/agent-board", icon: Bot, matchPrefixes: ["/agent-board"] },
-      { label: "链路追踪", href: "/trace", icon: Activity, matchPrefixes: ["/trace"] },
+      { label: "Session 看板", href: "/trace", icon: Activity, matchPrefixes: ["/trace"], keywords: ["链路", "追踪", "trace", "会话"] },
       { label: "业务数据看板", href: "/biz-stats", icon: TrendingUp, matchPrefixes: ["/biz-stats"] },
       { label: "Skill 使用看板", href: "/skill-stats", icon: Flame },
     ],
@@ -64,7 +64,15 @@ export function AppSidebar() {
   const kw = query.trim().toLowerCase();
   const visibleGroups = kw
     ? navGroups
-        .map((g) => ({ ...g, items: g.items.filter((i) => i.label.toLowerCase().includes(kw)) }))
+        .map((g) => ({
+          ...g,
+          items: g.items.filter(
+            (i) =>
+              i.label.toLowerCase().includes(kw) ||
+              // 旧名字/英文别名也命中，改名后老习惯不会失效
+              ((i as { keywords?: string[] }).keywords ?? []).some((k) => k.toLowerCase().includes(kw)),
+          ),
+        }))
         .filter((g) => g.items.length > 0)
     : navGroups;
 

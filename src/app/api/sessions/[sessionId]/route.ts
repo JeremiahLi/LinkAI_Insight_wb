@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { getSessionBaseline } from "@/lib/engine/stats/session-board";
+
+/** 工具调用口径：command（shell 命令）与 tool_call 同属工具调用，与 trace 前端 isToolKind 一致 */
+function isToolKind(kind: string): boolean {
+  return kind === "tool_call" || kind === "command";
+}
 
 
 export async function GET(
@@ -79,6 +85,45 @@ export async function GET(
     };
   });
 
+  /* ---- 会话级指标（与 header chip 同源，不读冗余列） ---- */
+  const llmCalls = allSpans.filter((s) => s.kind === "llm_thinking").length;
+  const toolSpans = allSpans.filter((s) => isToolKind(s.kind));
+  const toolCalls = toolSpans.length;
+  const failedTools = toolSpans.filter((s) => s.status === "failed").length;
+  const failedSpans = allSpans.filter((s) => s.status === "failed" || s.status === "error").length;
+  const thinkMs = allSpans.reduce(
+    (n, s) => n + (s.kind === "llm_thinking" ? (s.llmThinkDuration ?? s.duration) : 0),
+    0,
+  );
+  const toolMs = allSpans.reduce(
+    (n, s) => n + (isToolKind(s.kind) ? (s.toolDuration ?? s.duration) : 0),
+    0,
+  );
+  const billableTokens = session.totalInputTokens + session.totalOutputTokens;
+  const metrics = {
+    billableTokens,
+    totalTokens: session.totalTokens,
+    durationMs: session.totalDuration,
+    perRoundMs:
+      session.totalRounds > 0 ? Math.round(session.totalDuration / session.totalRounds) : 0,
+    llmCalls,
+    toolCalls,
+    failedTools,
+    failedSpans,
+    toolsPerLlm: llmCalls > 0 ? Number((toolCalls / llmCalls).toFixed(2)) : 0,
+    thinkMs,
+    toolMs,
+    thinkSharePct:
+      thinkMs + toolMs > 0 ? Math.round((thinkMs / (thinkMs + toolMs)) * 100) : 0,
+    toolFailPct: toolCalls > 0 ? Number(((failedTools / toolCalls) * 100).toFixed(2)) : 0,
+  };
+
+  // 基准算失败不能拖垮详情页本身：降级为「无基准」，前端按 samples=0 显示 —
+  const baseline = await getSessionBaseline(prisma, { agentId: session.agentId }).catch((err) => {
+    console.error("[session-detail] 基准计算失败", err);
+    return null;
+  });
+
   const result = {
     id: session.id,
     projectId: session.projectId,
@@ -105,6 +150,13 @@ export async function GET(
     totalTokens: session.totalTokens,
     totalDuration: session.totalDuration,
     forkCount: session.forkCount,
+    /**
+     * 会话级指标：全部由内存里的 allSpans 现算，与详情页 header 的 LLM/Tool chip 完全同源，
+     * 不依赖 Session.llmCallCount 是否已回填。
+     */
+    metrics,
+    /** 同 Agent 近 30 天的中位数 / P90，供 header 的倍数额度对比 */
+    baseline,
     rounds,
   };
 

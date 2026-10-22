@@ -258,10 +258,16 @@ function toIntOr(v: unknown, fallback: number): number {
     let totalCacheWriteTokens = 0;
     let totalDuration = 0;
     let errorCount = 0;
+    let llmCallCount = 0;
+    let toolCallCount = 0;
 
     for (const sp of allSpans) {
       roundIndices.add(sp.roundIndex);
       if (sp.status === "failed") errorCount++;
+      // 口径与 scripts/backfill-session-counters.cjs、session-board.ts 保持一致
+      if (sp.kind === "llm_thinking") llmCallCount++;
+      // command（shell 命令）与 tool_call 同属「工具调用」，与 trace 前端 isToolKind 对齐
+      if (sp.kind === "tool_call" || sp.kind === "command") toolCallCount++;
       totalDuration += sp.duration;
       totalInputTokens += sp.inputTokens;
       totalOutputTokens += sp.outputTokens;
@@ -299,6 +305,8 @@ function toIntOr(v: unknown, fallback: number): number {
         totalRounds: Math.max(roundIndices.size, existingSession?.totalRounds ?? 0),
         totalSpans: Math.max(allSpans.length, existingSession?.totalSpans ?? 0),
         errorCount,
+        llmCallCount,
+        toolCallCount,
         totalInputTokens,
         totalOutputTokens,
         totalCacheReadTokens,

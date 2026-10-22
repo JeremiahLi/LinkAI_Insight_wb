@@ -16,7 +16,7 @@ Agent 运维观测平台，用于监控和分析 AI Agent 的运行状态、Toke
 | 模块 | 路径 | 说明 |
 |------|------|------|
 | 概览仪表盘 | `/` | 核心指标监控、异常预警、Agent/Skill/Session 排行 |
-| 链路追踪 | `/trace` | Session 调用链路详情、Span 树状图 |
+| Session 看板 | `/trace` | Session 成本/耗时水位、异常榜单、调用链路详情 |
 | 业务数据看板 | `/biz-stats` | 业务指标统计与趋势 |
 | Skill 使用看板 | `/skill-stats` | Skill 调用次数与热度 |
 | Agent 性能看板 | `/agent-stats` | Agent 调用统计与成功率 |
@@ -86,7 +86,7 @@ npm start
     ├── app/
     │   ├── (main)/          # 主应用页面
     │   │   ├── page.tsx     # 仪表盘
-    │   │   ├── trace/       # 链路追踪
+    │   │   ├── trace/       # Session 看板
     │   │   ├── biz-stats/   # 业务数据
     │   │   ├── skill-stats/ # Skill 看板
     │   │   ├── agent-stats/ # Agent 看板
@@ -97,7 +97,7 @@ npm start
     ├── components/
     │   ├── shell/           # 应用外壳（侧边栏、顶栏）
     │   ├── ui/              # 基础 UI 组件
-    │   ├── trace/           # 链路追踪组件
+    │   ├── trace/           # Session 看板组件
     │   ├── agent/           # Agent 相关组件
     │   └── skill/           # Skill 相关组件
     └── lib/                 # 工具函数与 Hooks

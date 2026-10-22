@@ -127,6 +127,42 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
     [spans],
   );
 
+  /** 会话级指标优先用服务端算的值，缺失时用前端统计兜底（老响应/降级场景） */
+  const metricOf = useMemo(
+    () => ({
+      billableTokens: detail?.metrics?.billableTokens ?? (detail ? detail.totalInputTokens + detail.totalOutputTokens : 0),
+      durationMs: detail?.metrics?.durationMs ?? detail?.totalDuration ?? 0,
+      perRoundMs:
+        detail?.metrics?.perRoundMs ??
+        (detail && detail.totalRounds > 0 ? Math.round(detail.totalDuration / detail.totalRounds) : 0),
+      llmCalls: detail?.metrics?.llmCalls ?? llmCount,
+      toolCalls: detail?.metrics?.toolCalls ?? toolCount,
+      toolsPerLlm:
+        detail?.metrics?.toolsPerLlm ?? (llmCount > 0 ? Number((toolCount / llmCount).toFixed(2)) : 0),
+      thinkSharePct: detail?.metrics?.thinkSharePct ?? 0,
+      toolFailPct: detail?.metrics?.toolFailPct ?? 0,
+    }),
+    [detail, llmCount, toolCount],
+  );
+
+  /** 构造 chip 的倍数额度：无基准（或样本为 0）时返回 undefined，chip 只显示绝对值 */
+  const ratioOf = useCallback(
+    (key: keyof NonNullable<SessionDetail["baseline"]>["metrics"], value: number) => {
+      const base = detail?.baseline;
+      const m = base?.metrics?.[key];
+      if (!base || !m || base.samples === 0 || m.median <= 0) return undefined;
+      return {
+        mult: value / m.median,
+        over: m.p90 > 0 && value > m.p90,
+        p50: m.median,
+        p90: m.p90,
+        samples: base.samples,
+        scope: base.scope,
+      };
+    },
+    [detail?.baseline],
+  );
+
   // ?spanId= 只应用一次：之后用户手动点的选中项不能被刷新/重算覆盖
   useEffect(() => {
     if (appliedLinkRef.current || spans.length === 0) return;
@@ -208,8 +244,17 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
               · {detail.agentName} · {detail.projectName} · {detail.userName} · #{detail.id.slice(0, 8)}
             </span>
           </div>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-            <StatChip label="耗时" value={formatDuration(detail.totalDuration)} />
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+            <StatChip
+              label="耗时"
+              value={formatDuration(detail.totalDuration)}
+              ratio={ratioOf("durationMs", metricOf.durationMs)}
+            />
+            <StatChip
+              label="成本"
+              value={formatTokens(metricOf.billableTokens)}
+              ratio={ratioOf("billableTokens", metricOf.billableTokens)}
+            />
             <StatChip
               label="In"
               value={formatTokens(detail.totalInputTokens)}
@@ -220,21 +265,65 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
               value={formatTokens(detail.totalOutputTokens)}
               valueClass="text-[var(--trace-tool)]"
             />
-            <StatChip label="Total" value={formatTokens(detail.totalTokens)} />
-            <StatChip label="LLM" value={String(llmCount)} />
+            {/* 单轮耗时：消掉「会话长所以慢」的干扰，是跨会话比较耗时的正确口径 */}
+            <StatChip
+              label="单轮"
+              value={formatDuration(metricOf.perRoundMs)}
+              ratio={ratioOf("perRoundMs", metricOf.perRoundMs)}
+            />
+            <StatChip
+              label="LLM"
+              value={String(metricOf.llmCalls)}
+              ratio={ratioOf("llmCalls", metricOf.llmCalls)}
+            />
             {/* 终态与「过程失败」分开看：过程有失败不代表会话失败 */}
             <OutcomeBadge outcome={detail.outcome ?? ""} status={detail.status} />
             <StatChip
               label="Tool"
               value={
                 <>
-                  {toolCount}{" "}
+                  {metricOf.toolCalls}{" "}
                   {failedToolCount > 0 && (
                     <span className="text-destructive">({failedToolCount} failed)</span>
                   )}
                 </>
               }
+              ratio={ratioOf("toolCalls", metricOf.toolCalls)}
             />
+            <StatChip
+              label="Tool/LLM"
+              value={metricOf.toolsPerLlm.toFixed(2)}
+              ratio={ratioOf("toolsPerLlm", metricOf.toolsPerLlm)}
+            />
+            {/* 排障分叉：慢在模型（思考占比高）还是慢在工具（工具占比高）。
+                占比是有界值，不挂倍数徽章——89% 相对中位 52% 的「×1.7」会误导成量级膨胀 */}
+            <StatChip
+              label="思考占比"
+              value={
+                metricOf.thinkSharePct > 0
+                  ? `${metricOf.thinkSharePct}% / ${100 - metricOf.thinkSharePct}%`
+                  : "—"
+              }
+            />
+            {detail.baseline ? (
+              <span
+                className={cn(
+                  "rounded-sm px-1.5 py-0.5 text-[10px] font-medium",
+                  detail.baseline.scope === "agent"
+                    ? "bg-muted text-muted-foreground"
+                    : "bg-warning/10 text-warning ring-1 ring-warning/30",
+                )}
+                title={
+                  detail.baseline.scope === "agent"
+                    ? `基准来自该 Agent 近 ${detail.baseline.windowDays} 天的 ${detail.baseline.samples} 个会话`
+                    : `该 Agent 近 ${detail.baseline.windowDays} 天仅 ${detail.baseline.agentSamples ?? 0} 个有效会话，不足判定阈值，退回全局基准（n=${detail.baseline.samples}）`
+                }
+              >
+                {detail.baseline.scope === "agent"
+                  ? `本 Agent 基准 n=${detail.baseline.samples}`
+                  : `全局基准 n=${detail.baseline.samples}`}
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -344,19 +433,53 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
   );
 }
 
+/**
+ * header 指标 chip。
+ *
+ * ratio 存在时在数值右上角挂一个「×1.8」徽章：倍数跟着数字走，而不是另起一条对比横条
+ * ——后者会和这里已有的 耗时/In/Out/Total/LLM/Tool 六个数字重复五项，还白占 40+ px 高度。
+ */
 function StatChip({
   label,
   value,
   valueClass,
+  ratio,
 }: {
   label: string;
   value: React.ReactNode;
   valueClass?: string;
+  /** mult = 本会话值 / 中位数；over = 是否超过 P90 */
+  ratio?: { mult: number; over: boolean; p50: number; p90: number; samples: number; scope: "agent" | "global" };
 }) {
+  const tone = !ratio
+    ? ""
+    : ratio.over
+      ? "text-destructive"
+      : ratio.mult >= 1.5
+        ? "text-warning"
+        : "text-muted-foreground";
   return (
-    <div className="flex items-center gap-1.5 whitespace-nowrap">
+    <div
+      className="flex items-center gap-1.5 whitespace-nowrap"
+      title={
+        ratio
+          ? `相对${ratio.scope === "agent" ? "本 Agent" : "全局（该 Agent 样本不足）"}近 30 天基线：` +
+            `中位 ${ratio.p50.toLocaleString()} · P90 ${ratio.p90.toLocaleString()} · 样本 n=${ratio.samples}`
+          : undefined
+      }
+    >
       <span className="text-muted-foreground">{label}</span>
       <span className={cn("font-mono font-medium", valueClass)}>{value}</span>
+      {ratio && Number.isFinite(ratio.mult) && ratio.mult > 1.1 ? (
+        <span
+          className={cn(
+            "rounded-sm bg-muted px-1 py-[1px] font-mono text-[10px] leading-none tabular-nums",
+            tone,
+          )}
+        >
+          ×{ratio.mult.toFixed(1)}
+        </span>
+      ) : null}
     </div>
   );
 }

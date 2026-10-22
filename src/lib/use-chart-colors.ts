@@ -125,3 +125,35 @@ export function useMetricAccents(): Record<MetricKey, MetricAccent> {
   const isDark = useIsDark();
   return isDark ? DARK_ACCENTS : LIGHT_ACCENTS;
 }
+
+/**
+ * 会话终态语义色：与 OutcomeBadge 的 success / warning / destructive 同源。
+ * 只用于图表（散点/堆叠柱），语义固定为「成功 / 部分成功 / 失败」，不要挪作他用。
+ */
+export type OutcomeKey = "success" | "partial" | "failed" | "unknown";
+
+const LIGHT_OUTCOME: Record<OutcomeKey, string> = {
+  success: "oklch(0.6 0.15 155)",
+  partial: "oklch(0.72 0.16 70)",
+  failed: "oklch(0.58 0.22 25)",
+  unknown: "oklch(0.62 0.02 260)",
+};
+
+const DARK_OUTCOME: Record<OutcomeKey, string> = {
+  success: "#3fb950",
+  partial: "#d29922",
+  failed: "#f85149",
+  unknown: "#8b949e",
+};
+
+export function useOutcomePalette(): Record<OutcomeKey, string> {
+  const isDark = useIsDark();
+  return isDark ? DARK_OUTCOME : LIGHT_OUTCOME;
+}
+
+/** 把后端 outcome 字符串收敛成四个绘图键 */
+export function normalizeOutcome(outcome: string, status?: string): OutcomeKey {
+  if (outcome === "success" || outcome === "partial" || outcome === "failed") return outcome;
+  if (status === "active") return "unknown";
+  return "unknown";
+}

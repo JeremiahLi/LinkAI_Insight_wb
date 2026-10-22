@@ -28,6 +28,9 @@ export async function DELETE(request: Request) {
 }
 
 export async function GET() {
+  // 说明：当前是全表返回 + 客户端筛选（231 条约 60KB，够用）。
+  // 触发服务端分页的条件：Session 超过 2000 条，或本响应体超过 1MB。
+  // 届时分两步走：① 加 ?range&limit&offset（仍返回数组）；② 过滤条件下沉并改返回 { rows, total }。
   const sessions = await prisma.session.findMany({
     orderBy: { startTime: "desc" },
     include: {
@@ -56,11 +59,15 @@ export async function GET() {
     totalRounds: s.totalRounds,
     totalSpans: s.totalSpans,
     errorCount: s.errorCount,
+    llmCallCount: s.llmCallCount,
+    toolCallCount: s.toolCallCount,
     totalInputTokens: s.totalInputTokens,
     totalOutputTokens: s.totalOutputTokens,
     totalCacheReadTokens: s.totalCacheReadTokens,
     totalCacheWriteTokens: s.totalCacheWriteTokens,
     totalTokens: s.totalTokens,
+    /** 可计费 Token = input + output，不含 cache（与 Agent 看板成本口径一致） */
+    billableTokens: s.totalInputTokens + s.totalOutputTokens,
     totalDuration: s.totalDuration,
     forkCount: s.forkCount,
   }));

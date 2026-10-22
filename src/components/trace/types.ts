@@ -84,5 +84,54 @@ export interface SessionDetail {
   totalTokens: number;
   totalDuration: number;
   forkCount: number;
+  /** 会话级指标（服务端按 Span 现算，与 header chip 同源） */
+  metrics?: SessionMetrics;
+  /** 同 Agent 近 30 天的中位数 / P90；null 表示基准计算失败 */
+  baseline?: SessionDetailBaseline | null;
   rounds: RoundNode[];
+}
+
+/** 详情页的会话级指标，服务端由 Span 现算 */
+export interface SessionMetrics {
+  billableTokens: number;
+  totalTokens: number;
+  durationMs: number;
+  perRoundMs: number;
+  llmCalls: number;
+  toolCalls: number;
+  failedTools: number;
+  failedSpans: number;
+  toolsPerLlm: number;
+  thinkMs: number;
+  toolMs: number;
+  thinkSharePct: number;
+  toolFailPct: number;
+}
+
+export interface BaselineMetric {
+  median: number;
+  p90: number;
+}
+
+export type BaselineMetrics = Record<
+  | "billableTokens"
+  | "durationMs"
+  | "perRoundMs"
+  | "llmCalls"
+  | "toolCalls"
+  | "toolsPerLlm"
+  | "thinkSharePct"
+  | "toolFailPct",
+  BaselineMetric
+>;
+
+export interface SessionDetailBaseline {
+  /** agent = 该 Agent 样本充足；global = 样本不足退回全局 */
+  scope: "agent" | "global";
+  /** 实际参与基准计算的会话数（scope=global 时是全局样本数） */
+  samples: number;
+  /** 该 Agent 自身的有效会话数 */
+  agentSamples?: number;
+  windowDays: number;
+  metrics: BaselineMetrics;
 }

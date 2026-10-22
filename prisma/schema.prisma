@@ -66,6 +66,14 @@ model Session {
   totalRounds      Int      @default(0)
   totalSpans       Int      @default(0)
   errorCount       Int      @default(0)
+  /// LLM 调用次数：Span.kind='llm_thinking' 的计数。
+  /// 冗余落列的原因：Session 列表与看板要按会话直接读，避免每行 JOIN 聚合 Span。
+  /// 口径与详情页 header 的 LLM chip（session-detail-view.tsx 的 llmCount）一致。
+  llmCallCount     Int      @default(0)
+  /// 工具调用次数：Span.kind IN ('tool_call','command')。
+  /// 注意包含 command（shell 命令），与 trace 前端 isToolKind 口径一致；
+  /// agent-board.ts 的 toolCalls 只统计 'tool_call'，两处口径差异属历史遗留。
+  toolCallCount    Int      @default(0)
   totalInputTokens Int      @default(0)
   totalOutputTokens Int     @default(0)
   totalCacheReadTokens  Int  @default(0)
