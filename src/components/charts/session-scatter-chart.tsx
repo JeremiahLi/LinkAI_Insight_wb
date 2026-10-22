@@ -95,6 +95,19 @@ export function SessionScatterChart({
   const xTicks = useMemo(() => logTicks(points.map((p) => p.x), TOKEN_TICKS), [points]);
   const yTicks = useMemo(() => logTicks(points.map((p) => p.y), DURATION_TICKS), [points]);
 
+  // 对数域两端留冗余：贴着数据 min/max 取域时，最边缘的点会被 plot 区裁掉一半。
+  // 乘性系数在对数轴上等价于"留出固定比例的视觉空间"，右侧/上方各多留一点。
+  const xDomain = useMemo<[number, number] | undefined>(() => {
+    const xs = points.map((p) => p.x).filter((v) => v > 0);
+    if (xs.length === 0) return undefined;
+    return [Math.min(...xs) / 1.5, Math.max(...xs) * 1.5];
+  }, [points]);
+  const yDomain = useMemo<[number, number] | undefined>(() => {
+    const ys = points.map((p) => p.y).filter((v) => v > 0);
+    if (ys.length === 0) return undefined;
+    return [Math.min(...ys) / 1.4, Math.max(...ys) * 2];
+  }, [points]);
+
   const grouped = SERIES.map((s) => ({
     ...s,
     data: points.filter((p) => normalizeOutcome(p.outcome) === s.key),
@@ -103,14 +116,19 @@ export function SessionScatterChart({
   const unknown = points.filter((p) => normalizeOutcome(p.outcome) === "unknown");
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
-      <ScatterChart margin={{ top: 4, right: 20, bottom: 4, left: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke={colors.grid} />
-        <XAxis
-          type="number"
-          dataKey="x"
-          scale="log"
-          domain={["auto", "auto"]}
+    <div className="relative">
+      {/* 纵轴说明：旋转 90° 贴在刻度左侧（recharts 自带 label 的定位在不同 margin 下不稳，手工摆） */}
+      <span className="pointer-events-none absolute left-1 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2 -rotate-90 whitespace-nowrap text-[11px] text-muted-foreground">
+        端到端耗时（对数）
+      </span>
+      <ResponsiveContainer width="100%" height={height}>
+        <ScatterChart margin={{ top: 4, right: 24, bottom: 4, left: 6 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={colors.grid} />
+          <XAxis
+            type="number"
+            dataKey="x"
+            scale="log"
+            domain={xDomain ?? ["auto", "auto"]}
           ticks={xTicks.length > 0 ? xTicks : undefined}
           allowDataOverflow
           tick={{ fontSize: 11, fill: colors.text }}
@@ -122,7 +140,7 @@ export function SessionScatterChart({
           type="number"
           dataKey="y"
           scale="log"
-          domain={["auto", "auto"]}
+          domain={yDomain ?? ["auto", "auto"]}
           ticks={yTicks.length > 0 ? yTicks : undefined}
           allowDataOverflow
           tick={{ fontSize: 11, fill: colors.text }}
@@ -187,7 +205,10 @@ export function SessionScatterChart({
             isAnimationActive={false}
           />
         )}
-      </ScatterChart>
-    </ResponsiveContainer>
+        </ScatterChart>
+      </ResponsiveContainer>
+      {/* 横轴说明：放在刻度下方居中 */}
+      <p className="mt-1 text-center text-[11px] text-muted-foreground">可计费 Token（对数）</p>
+    </div>
   );
 }

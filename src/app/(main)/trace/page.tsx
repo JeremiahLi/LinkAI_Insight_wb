@@ -407,12 +407,11 @@ export default function SessionBoardPage() {
           <CardHeader className="flex-row items-baseline justify-between space-y-0 border-b border-border/60 pb-2.5">
             <CardTitle>成本 × 耗时分布</CardTitle>
             <span className="text-[11px] text-muted-foreground/80">
-              横轴可计费 Token · 纵轴端到端耗时（均对数）· 大圈 = ≥
-              {board?.meta.anomalyMinScore ?? 2} 项超 P90 · 显示 {board?.meta.scatterReturned ?? 0} /{" "}
+              大圈 = ≥{board?.meta.anomalyMinScore ?? 2} 项超 P90 · 显示 {board?.meta.scatterReturned ?? 0} /{" "}
               {board?.meta.scatterTotal ?? 0}
             </span>
           </CardHeader>
-          <CardContent className="pt-3">
+          <CardContent className="flex flex-1 flex-col justify-center pt-3">
             {!board || board.scatter.length === 0 ? (
               <p className="flex h-[320px] items-center justify-center text-sm text-muted-foreground">
                 该时间窗没有可绘制的会话（Token 或耗时为 0）
