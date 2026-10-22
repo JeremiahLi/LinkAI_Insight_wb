@@ -15,7 +15,8 @@ import { useChartColors, useCategoryPalette } from "@/lib/use-chart-colors";
 
 /**
  * 横向条形图（升级版）：
- * - 每根柱子独立颜色（分类色板）+ 同色渐变 + 圆角
+ * - 每根柱子独立颜色：默认按分类色板顺序取色，也可由调用方通过 datum.color 指定
+ *   （同一实体出现在多张图里时，需要显式指定才能保证两图同色）
  * - 条尾数值标注
  * - Y 轴只显示名称（不带 emoji）
  */
@@ -26,7 +27,7 @@ export function FancyBarChartH({
   yAxisInterval,
   xInteger,
 }: {
-  data: { name: string; value: number }[];
+  data: { name: string; value: number; color?: string }[];
   valueFormatter: (v: number) => string;
   ariaLabel?: string;
   /**
@@ -81,8 +82,8 @@ export function FancyBarChartH({
           barSize={14}
           fillOpacity={0.85}
         >
-          {data.map((_, i) => (
-            <Cell key={i} fill={palette[i % palette.length]} />
+          {data.map((d, i) => (
+            <Cell key={`${d.name}-${i}`} fill={d.color ?? palette[i % palette.length]} />
           ))}
           <LabelList
             dataKey="value"

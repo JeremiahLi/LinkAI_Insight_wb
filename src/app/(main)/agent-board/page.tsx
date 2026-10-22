@@ -7,6 +7,7 @@ import { KpiCard } from "@/components/shell/kpi-card";
 import { FancyBarChartH } from "@/components/charts/fancy-bar-chart-h";
 import { MultiLineTrendChart } from "@/components/charts/multi-line-trend-chart";
 import { AgentCompareTable } from "@/components/agent/agent-compare-table";
+import { useCategoryPalette } from "@/lib/use-chart-colors";
 import { formatDuration, formatNumber, formatTokens, pctChange } from "@/lib/format";
 import { RANGE_OPTIONS, type StatsRange } from "@/lib/engine/stats/range";
 import { HEALTH_WINDOW_DAYS } from "@/lib/engine/stats/health";
@@ -49,6 +50,7 @@ export default function AgentBoardPage() {
   const [loading, setLoading] = useState(true);
   const [trend, setTrend] = useState<TrendData>({ labels: [], series: [] });
   const [trendLoading, setTrendLoading] = useState(false);
+  const palette = useCategoryPalette();
 
   useEffect(() => {
     let cancelled = false;
@@ -99,14 +101,27 @@ export default function AgentBoardPage() {
   // 工具失败率对比：样本太小的 Agent（<5 次调用）不参与，避免 1/1=100% 抢眼
   // 名字过长的截断，否则 Y 轴标签会折行叠在一起（完整名在上面的矩阵表里）
   const shortName = (n: string, max = 11) => (n.length > max ? `${n.slice(0, max)}…` : n);
+  // Agent → 颜色：按 Agent 名升序的位置分配，与两张图各自的排序、与时间档筛选都无关，
+  // 所以同一个 Agent 在「会话数」和「工具失败率」两张图里恒定同色。
+  // 基准取全量 data.agents（接口 LEFT JOIN，未使用的 Agent 也在），切档时颜色不会整体错位。
+  const agentColor = new Map<string, string>();
+  [...data.agents]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .forEach((a, i) => agentColor.set(a.name, palette[i % palette.length]));
+  // 用截断前的原始 name 查色；截断后的 label 只用于显示
+  const colorOf = (name: string) => agentColor.get(name) ?? palette[0];
   // 会话数对比：0 会话的 Agent 不画（空柱子只是噪声），降序排名
   const sessionData = data.agents
     .filter((a) => a.sessions > 0)
-    .map((a) => ({ name: shortName(a.name), value: a.sessions }))
+    .map((a) => ({ name: shortName(a.name), value: a.sessions, color: colorOf(a.name) }))
     .sort((a, b) => b.value - a.value);
   const failRateData = data.agents
     .filter((a) => a.toolCalls >= 5 && a.toolFailRate != null)
-    .map((a) => ({ name: shortName(a.name), value: Number(a.toolFailRate!.toFixed(2)) }))
+    .map((a) => ({
+      name: shortName(a.name),
+      value: Number(a.toolFailRate!.toFixed(2)),
+      color: colorOf(a.name),
+    }))
     .sort((a, b) => b.value - a.value);
   // 两卡同一行，图表高度取两者行数较大者（对齐柱距便于横向对比），并封顶避免 20+ Agent 时卡片过高
   const chartH = Math.min(Math.max(210, Math.max(sessionData.length, failRateData.length) * 24), 420);
