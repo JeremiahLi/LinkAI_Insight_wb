@@ -417,11 +417,18 @@ export default function SessionBoardPage() {
                 该时间窗没有可绘制的会话（Token 或耗时为 0）
               </p>
             ) : (
-              <SessionScatterChart
-                points={board.scatter}
-                height={320}
-                onSelect={(id) => router.push(`/trace/${id}`)}
-              />
+              <div className="flex flex-col">
+                <SessionScatterChart
+                  points={board.scatter}
+                  height={320}
+                  onSelect={(id) => router.push(`/trace/${id}`)}
+                />
+                <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground/80">
+                  * 带外圈的点 = 8 项运行指标中 ≥{board?.meta.anomalyMinScore ?? 2} 项超过同 Agent 同窗口的 P90
+                  水位（即比 90% 的同类会话更差）。「显示 a / b」= 实际绘制点数 / 可绘制会话总数，
+                  仅当超过绘图上限时才对普通点抽样（异常点全保留）。
+                </p>
+              </div>
             )}
           </CardContent>
         </Card>
