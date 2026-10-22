@@ -11,7 +11,6 @@ import {
   Bell,
   Settings,
   Bot,
-  TrendingUp,
   Users,
   Search,
   Cpu,
@@ -36,7 +35,6 @@ const navGroups = [
         matchPrefixes: ["/skills"],
         keywords: ["工具", "skill", "技能", "tool", "调用", "失败"],
       },
-      { label: "业务数据看板", href: "/biz-stats", icon: TrendingUp, matchPrefixes: ["/biz-stats"] },
     ],
   },
   {
