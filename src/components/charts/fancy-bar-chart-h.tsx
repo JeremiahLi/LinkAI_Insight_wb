@@ -26,6 +26,7 @@ export function FancyBarChartH({
   ariaLabel,
   yAxisInterval,
   xInteger,
+  yAxisWidth = 160,
 }: {
   data: { name: string; value: number; color?: string }[];
   valueFormatter: (v: number) => string;
@@ -41,6 +42,12 @@ export function FancyBarChartH({
    * 四舍五入后会出现重复标签。
    */
   xInteger?: boolean;
+  /**
+   * Y 轴刻度区宽度。默认 160 适合短名（工具名/模型名）；
+   * 类目名较长（如 Skill 名）时标签会从左侧被裁掉（实测 recharts 不省略而是溢出裁切），
+   * 需要调用方放大并按需截断类目名。
+   */
+  yAxisWidth?: number;
 }) {
   const colors = useChartColors();
   const palette = useCategoryPalette();
@@ -62,7 +69,7 @@ export function FancyBarChartH({
           tick={{ fontSize: 12, fill: colors.text }}
           axisLine={false}
           tickLine={false}
-          width={160}
+          width={yAxisWidth}
           interval={yAxisInterval}
         />
         <Tooltip
