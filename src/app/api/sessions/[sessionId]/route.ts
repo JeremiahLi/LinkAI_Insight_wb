@@ -90,6 +90,8 @@ export async function GET(
     agentName: session.agent.name,
     agentEmoji: session.agent.emoji,
     status: session.status,
+    title: session.title,
+    outcome: session.outcome,
     model: session.model,
     startTime: session.startTime,
     endTime: session.endTime,

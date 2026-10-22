@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { RefreshCw, Trash2, Search, FlaskConical } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -20,8 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { StatusBadge } from "@/components/trace/shared";
-import { TraceViewerPanel } from "@/components/trace/trace-viewer-panel";
+import { OutcomeBadge } from "@/components/trace/shared";
 import { SampleToExperimentPanel } from "@/components/trace/sample-to-experiment-panel";
 import { PageHeader } from "@/components/shell/page-header";
 import { KpiCard } from "@/components/shell/kpi-card";
@@ -40,6 +40,10 @@ interface SessionItem {
   agentName: string;
   agentEmoji: string;
   status: string;
+  /** 会话标题（首条用户诉求），空串时前端回退为短 ID */
+  title: string;
+  /** success / partial / failed / 空串=未知 */
+  outcome: string;
   model: string;
   startTime: string;
   totalRounds: number;
@@ -53,13 +57,13 @@ interface SessionItem {
 }
 
 export default function TraceListPage() {
+  const router = useRouter();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [agentFilter, setAgentFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [page, setPage] = useState(1);
-  const [selectedSession, setSelectedSession] = useState<SessionItem | null>(null);
   const [timeWindow, setTimeWindow] = useState("all");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
@@ -90,7 +94,6 @@ export default function TraceListPage() {
     if (!confirm("确定删除该 Session 及其所有 Span 数据？")) return;
     const res = await fetch("/api/sessions?id=" + encodeURIComponent(sessionId), { method: "DELETE" });
     if (res.ok) {
-      if (selectedSession?.id === sessionId) setSelectedSession(null);
       loadSessions();
     } else {
       alert("删除失败");
@@ -104,13 +107,20 @@ export default function TraceListPage() {
       result = result.filter(
         (s) =>
           s.id.toLowerCase().includes(q) ||
+          (s.title ?? "").toLowerCase().includes(q) ||
           s.projectName.toLowerCase().includes(q) ||
           s.userName.toLowerCase().includes(q) ||
           s.agentName.toLowerCase().includes(q),
       );
     }
     if (agentFilter !== "all") result = result.filter((s) => s.agentId === agentFilter);
-    if (statusFilter !== "all") result = result.filter((s) => s.status === statusFilter);
+    if (statusFilter !== "all") {
+      // 按终态筛选：success/partial/failed 走 outcome，active 走 status
+      result =
+        statusFilter === "active"
+          ? result.filter((s) => s.status === "active")
+          : result.filter((s) => s.outcome === statusFilter);
+    }
     if (timeWindow !== "all") {
       const now = Date.now();
       result = result.filter((s) => {
@@ -206,9 +216,9 @@ export default function TraceListPage() {
         <KpiCard label="Session 总数" value={String(totalSessions)} sub="累计" />
         <KpiCard label="平均耗时" value={formatDuration(Math.round(avgDuration))} sub="每个 Session 均值" />
         <KpiCard
-          label="错误率"
+          label="Span 失败率"
           value={`${errorRate}%`}
-          sub="占总 Span 比例"
+          sub="过程失败占比，不等于会话失败"
           subTone={Number(errorRate) > 1 ? "warning" : "success"}
         />
         <KpiCard label="总 Token" value={formatTokens(totalTokens)} sub="累计消耗" />
@@ -242,14 +252,15 @@ export default function TraceListPage() {
           </SelectContent>
         </Select>
         <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v ?? "all"); setPage(1); }}>
-          <SelectTrigger className="h-8 w-[110px]">
+          <SelectTrigger className="h-8 w-[120px]">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">全部状态</SelectItem>
-            <SelectItem value="active">活跃</SelectItem>
-            <SelectItem value="completed">完成</SelectItem>
-            <SelectItem value="error">异常</SelectItem>
+            <SelectItem value="active">进行中</SelectItem>
+            <SelectItem value="success">成功</SelectItem>
+            <SelectItem value="partial">部分成功</SelectItem>
+            <SelectItem value="failed">失败</SelectItem>
           </SelectContent>
         </Select>
         <Select value={timeWindow} onValueChange={(v) => { setTimeWindow(v ?? "all"); setPage(1); }}>
@@ -289,7 +300,7 @@ export default function TraceListPage() {
               : "bg-muted/40 text-muted-foreground ring-1 ring-foreground/10 hover:ring-foreground/25"
           }`}
         >
-          仅看有错误
+          仅看过程失败
         </button>
         <div className="flex-1" />
         <Button
@@ -311,17 +322,11 @@ export default function TraceListPage() {
         onDone={() => setSelectedIds(new Set())}
       />
 
-      {/* Slide-in Detail Panel */}
-      <TraceViewerPanel
-        session={selectedSession}
-        open={selectedSession !== null}
-        onClose={() => setSelectedSession(null)}
-      />
-
       {/* Session Table */}
       <Card className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <div className="min-h-0 flex-1 overflow-auto scrollbar-thin">
-          <Table>
+          {/* table-fixed：标题列的 truncate 需要固定布局才生效，否则长路径会把整表撑出容器 */}
+          <Table className="table-fixed">
             <TableHeader className="sticky top-0 z-10">
                <TableRow className="bg-card hover:bg-card">
                  <TableHead className="w-[40px] text-center">
@@ -341,18 +346,19 @@ export default function TraceListPage() {
                      )}
                    </button>
                  </TableHead>
-                 <TableHead className="w-[110px] text-xs">Session ID</TableHead>
-                 <TableHead className="w-[140px] text-xs">Agent</TableHead>
-                 <TableHead className="w-[90px] text-xs">用户</TableHead>
-                 <TableHead className="w-[120px] text-xs">项目</TableHead>
-                 <TableHead className="w-[60px] text-center text-xs">轮次</TableHead>
-                 <TableHead className="w-[70px] text-center text-xs">Span</TableHead>
-                 <TableHead className="w-[60px] text-center text-xs">错误</TableHead>
-                 <TableHead className="w-[80px] text-right text-xs">Token</TableHead>
-                 <TableHead className="w-[80px] text-right text-xs">耗时</TableHead>
-                 <TableHead className="w-[80px] text-center text-xs">状态</TableHead>
-                 <TableHead className="w-[80px] text-right text-xs">时间</TableHead>
-                 <TableHead className="w-[60px] text-center text-xs">操作</TableHead>
+                <TableHead className="w-[86px] text-xs">Session</TableHead>
+                <TableHead className="w-[260px] text-xs">任务</TableHead>
+                <TableHead className="w-[120px] text-xs">Agent</TableHead>
+                <TableHead className="w-[80px] text-xs">用户</TableHead>
+                <TableHead className="w-[100px] text-xs">项目</TableHead>
+                <TableHead className="w-[56px] text-center text-xs">轮次</TableHead>
+                <TableHead className="w-[60px] text-center text-xs">Span</TableHead>
+                <TableHead className="w-[56px] text-center text-xs">过程失败</TableHead>
+                <TableHead className="w-[76px] text-right text-xs">Token</TableHead>
+                <TableHead className="w-[76px] text-right text-xs">耗时</TableHead>
+                <TableHead className="w-[84px] text-center text-xs">结果</TableHead>
+                <TableHead className="w-[76px] text-right text-xs">时间</TableHead>
+                <TableHead className="w-[56px] text-center text-xs">操作</TableHead>
                </TableRow>
             </TableHeader>
             <TableBody className="divide-y divide-border/60">
@@ -360,7 +366,7 @@ export default function TraceListPage() {
                 <TableRow
                   key={session.id}
                   className="h-11 cursor-pointer transition-colors hover:bg-muted/30"
-                  onClick={() => setSelectedSession(session)}
+                  onClick={() => router.push(`/trace/${session.id}`)}
                 >
                    <TableCell className="text-center" onClick={(e) => e.stopPropagation()}>
                      <button
@@ -379,7 +385,18 @@ export default function TraceListPage() {
                        )}
                      </button>
                    </TableCell>
-                   <TableCell className="font-mono text-xs text-muted-foreground">{session.id}</TableCell>
+                   <TableCell className="font-mono text-[11px] text-muted-foreground" title={session.id}>
+                     {session.id.slice(0, 8)}
+                   </TableCell>
+                   <TableCell>
+                     {session.title ? (
+                       <span className="line-clamp-1 text-[13px]" title={session.title}>
+                         {session.title}
+                       </span>
+                     ) : (
+                       <span className="text-[13px] text-muted-foreground/60">（无标题）</span>
+                     )}
+                   </TableCell>
                   <TableCell>
                     <span className="text-[13px] font-medium">{session.agentName}</span>
                   </TableCell>
@@ -389,7 +406,12 @@ export default function TraceListPage() {
                    <TableCell className="text-center font-mono text-[13px] tabular-nums">{session.totalSpans}</TableCell>
                    <TableCell className="text-center">
                      {session.errorCount > 0 ? (
-                       <span className="font-mono text-[13px] font-medium tabular-nums text-destructive">{session.errorCount}</span>
+                       <span
+                         className="font-mono text-[13px] font-medium tabular-nums text-warning"
+                         title="过程中失败的 span 数（工具重试、质检回流等），不代表会话失败"
+                       >
+                         {session.errorCount}
+                       </span>
                      ) : (
                        <span className="text-[13px] text-muted-foreground">0</span>
                      )}
@@ -399,7 +421,7 @@ export default function TraceListPage() {
                      {formatDuration(session.totalDuration)}
                    </TableCell>
                   <TableCell className="text-center">
-                    <StatusBadge status={session.status as "active" | "completed" | "error"} />
+                    <OutcomeBadge outcome={session.outcome} status={session.status} />
                   </TableCell>
                    <TableCell className="text-right text-xs text-muted-foreground">
                      {formatRelativeTime(new Date(session.startTime).getTime())}

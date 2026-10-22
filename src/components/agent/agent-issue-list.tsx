@@ -91,8 +91,12 @@ export function AgentIssueList({ issues }: { issues: AgentIssue[] }) {
                   <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
                     {issue.links.map((l) => (
                       <Link
-                        key={`${issue.id}-${l.sessionId}-${l.label}`}
-                        href={`/trace/${l.sessionId}`}
+                        key={`${issue.id}-${l.sessionId}-${l.spanId ?? l.label}`}
+                        href={
+                          l.spanId
+                            ? `/trace/${l.sessionId}?spanId=${encodeURIComponent(l.spanId)}`
+                            : `/trace/${l.sessionId}`
+                        }
                         className="inline-flex items-center gap-0.5 text-[11px] text-primary hover:underline"
                       >
                         {l.label}

@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader, SegmentedControl } from "@/components/shell/page-header";
 import { KpiCard } from "@/components/shell/kpi-card";
-import { Sparkline } from "@/components/charts/sparkline";
 import { FancyBarChartH } from "@/components/charts/fancy-bar-chart-h";
 import { MultiLineTrendChart } from "@/components/charts/multi-line-trend-chart";
 import { AgentCompareTable } from "@/components/agent/agent-compare-table";
@@ -20,12 +19,12 @@ import { cn } from "@/lib/utils";
  *
  * 与「用户看板」的分工：用户看板回答「谁在用」，本页回答「Agent 用得怎么样」：
  *   1. KPI 行     —— 多少 Agent 在跑、整体成功率、整体耗时水位
- *   2. 活跃分层   —— 今日/近7天/近30天各有几个在跑，谁沉默了
+ *   2. 会话数对比 —— 各 Agent 会话数，唯一能一眼看出「谁在被用得最多」的形状
  *   3. 使用趋势   —— 各 Agent 的会话数 / Token / 失败数走势
  *   4. 工具失败率 —— 唯一能一眼看出「谁在坏」的形状
  *   5. 对比矩阵   —— 全量指标 + 健康分，可排序、可下钻
  *
- * 口径：时间过滤用 Session.startTime；成功率 = 1 - 有失败 span 的会话占比；
+ * 口径：时间过滤用 Session.startTime；成功率 = 1 - (失败会话 + 部分成功×0.5) / 完成会话；
  * 健康分固定近 30 天（与页面时间档解耦），列头已标注。
  */
 
@@ -99,20 +98,26 @@ export default function AgentBoardPage() {
 
   // 工具失败率对比：样本太小的 Agent（<5 次调用）不参与，避免 1/1=100% 抢眼
   // 名字过长的截断，否则 Y 轴标签会折行叠在一起（完整名在上面的矩阵表里）
-  const shortName = (n: string) => (n.length > 13 ? `${n.slice(0, 13)}…` : n);
+  const shortName = (n: string, max = 11) => (n.length > max ? `${n.slice(0, max)}…` : n);
+  // 会话数对比：0 会话的 Agent 不画（空柱子只是噪声），降序排名
+  const sessionData = data.agents
+    .filter((a) => a.sessions > 0)
+    .map((a) => ({ name: shortName(a.name), value: a.sessions }))
+    .sort((a, b) => b.value - a.value);
   const failRateData = data.agents
     .filter((a) => a.toolCalls >= 5 && a.toolFailRate != null)
     .map((a) => ({ name: shortName(a.name), value: Number(a.toolFailRate!.toFixed(2)) }))
     .sort((a, b) => b.value - a.value);
+  // 两卡同一行，图表高度取两者行数较大者（对齐柱距便于横向对比），并封顶避免 20+ Agent 时卡片过高
+  const chartH = Math.min(Math.max(210, Math.max(sessionData.length, failRateData.length) * 24), 420);
   const toolCallsTotal = data.agents.reduce((s, a) => s + a.toolCalls, 0);
   const toolFailedTotal = data.agents.reduce((s, a) => s + a.toolFailed, 0);
-  const silentNames = data.agents.filter((a) => a.sessions === 0).map((a) => a.name);
 
   return (
     <div className={cn("flex flex-col gap-5 p-6 transition-opacity", loading && "opacity-60")}>
       <PageHeader
         title="Agent 看板"
-        description={`全量 Agent 的使用对比与健康状态（${data.range}）· 成功率按「有失败 span 的会话」计`}
+        description={`全量 Agent 的使用对比与健康状态（${data.range}）· 成功率按「末轮是否有交付」计，部分成功按半失败折算`}
         actions={
           <SegmentedControl
             options={RANGE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
@@ -134,7 +139,7 @@ export default function AgentBoardPage() {
         <KpiCard
           label="总会话数"
           value={formatNumber(kpi.sessions)}
-          sub={`失败 ${kpi.badSessions} 个会话`}
+          sub={`失败 ${kpi.badSessions} · 部分成功 ${kpi.partialSessions ?? 0}`}
           trend={pctChange(kpi.sessions, kpi.sessionsPrev)}
         />
         <KpiCard
@@ -150,61 +155,29 @@ export default function AgentBoardPage() {
         />
       </div>
 
-      {/* 2. 活跃分层 + 3. 工具失败率 */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <Card className="flex flex-col lg:col-span-2">
+      {/* 2. 会话数对比 + 3. 工具失败率 */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <Card>
           <CardHeader className="flex-row items-baseline justify-between space-y-0 border-b border-border/60 pb-2.5">
-            <CardTitle>活跃 Agent 分层</CardTitle>
+            <CardTitle>Agent 会话数</CardTitle>
             <span className="text-[11px] text-muted-foreground/80">
-              固定近 {HEALTH_WINDOW_DAYS} 天窗口，与上方时间档无关
+              {data.range} · {sessionData.length} 个 Agent 有会话
             </span>
           </CardHeader>
-          <CardContent className="flex flex-1 flex-col pt-4">
-            <div className="grid grid-cols-3 gap-3">
-              {data.windows.map((w) => (
-                <div key={w.key} className="rounded-lg bg-muted/40 px-3 py-2.5">
-                  <p className="text-[11px] text-muted-foreground">{w.label}</p>
-                  <div className="mt-1 flex items-end justify-between gap-1">
-                    <p className="font-mono text-xl font-semibold leading-none tabular-nums">
-                      {w.activeAgents}
-                      <span className="ml-0.5 text-[11px] font-normal text-muted-foreground">个</span>
-                    </p>
-                    {/* 只有 1 个点时画不出走势，留空比画一条假线诚实 */}
-                    {w.dailyAgents.length >= 3 ? (
-                      <Sparkline data={w.dailyAgents} width={56} height={18} />
-                    ) : null}
-                  </div>
-                  <p className="mt-1 text-[11px] text-muted-foreground">{w.sessions} 会话</p>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-3 space-y-1.5 border-t border-border/60 pt-3 text-[13px]">
-              <div className="flex gap-2">
-                <span className="shrink-0 text-muted-foreground">本期沉默</span>
-                {silentNames.length === 0 ? (
-                  <span className="text-success">无，全部 Agent 都在使用</span>
-                ) : (
-                  <span className="leading-relaxed">{silentNames.join("、")}</span>
-                )}
-              </div>
-              <div className="flex gap-2">
-                <span className="shrink-0 text-muted-foreground">本期新增</span>
-                <span className="leading-relaxed">
-                  {data.newAgents.length > 0 ? data.newAgents.join("、") : "—"}
-                </span>
-              </div>
-              <div className="flex gap-2">
-                <span className="shrink-0 text-muted-foreground">本期消失</span>
-                <span className="leading-relaxed">
-                  {data.lostAgents.length > 0 ? (
-                    <span className="text-warning">{data.lostAgents.join("、")}</span>
-                  ) : (
-                    "—"
-                  )}
-                </span>
-              </div>
-            </div>
+          <CardContent className="pt-4" style={{ height: chartH }}>
+            {sessionData.length === 0 ? (
+              <p className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                该时间段暂无 Agent 有会话
+              </p>
+            ) : (
+              <FancyBarChartH
+                data={sessionData}
+                valueFormatter={(v) => formatNumber(v)}
+                ariaLabel="会话数"
+                yAxisInterval={0}
+                xInteger
+              />
+            )}
           </CardContent>
         </Card>
 
@@ -215,7 +188,7 @@ export default function AgentBoardPage() {
               {formatNumber(toolFailedTotal)} / {formatNumber(toolCallsTotal)} 次失败
             </span>
           </CardHeader>
-          <CardContent className="h-[210px] pt-4">
+          <CardContent className="pt-4" style={{ height: chartH }}>
             {failRateData.length === 0 ? (
               <p className="flex h-full items-center justify-center text-sm text-muted-foreground">
                 该时间段工具调用不足 5 次

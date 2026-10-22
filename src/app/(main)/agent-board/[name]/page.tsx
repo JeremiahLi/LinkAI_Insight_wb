@@ -174,7 +174,7 @@ export default function AgentDetailPage() {
         <KpiCard
           label="成功率"
           value={totals.successRate == null ? "—" : `${totals.successRate.toFixed(1)}%`}
-          sub={`失败 ${totals.badSessions} 个会话`}
+          sub={`失败 ${totals.badSessions} · 部分成功 ${totals.partialSessions ?? 0}`}
           subTone={totals.badSessions > 0 ? "warning" : "success"}
         />
         <KpiCard
@@ -380,7 +380,10 @@ export default function AgentDetailPage() {
                     <span className="w-[46px] shrink-0 text-right font-mono text-[10px] tabular-nums text-muted-foreground">
                       {totals.p95Duration > 0 ? `${(s.duration / totals.p95Duration).toFixed(1)}×` : "—"}
                     </span>
-                    <Link href={`/trace/${s.sessionId}`} className="shrink-0 text-[11px] text-primary hover:underline">
+                    <Link
+                      href={`/trace/${s.sessionId}?spanId=${encodeURIComponent(s.id)}`}
+                      className="shrink-0 text-[11px] text-primary hover:underline"
+                    >
                       链路
                     </Link>
                   </li>

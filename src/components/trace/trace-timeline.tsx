@@ -23,6 +23,12 @@ interface Props {
   onSelectCall?: (callId: string, view: "cum" | "delta") => void;
   /** 当前高亮的 LLM 调用（call.id = llm_thinking span.id）：左树/甘特/两图同步标记 */
   highlightCallId?: string | null;
+  /**
+   * 需要「露出来」的 span：深链落地时把甘特缩放域收到该 span 附近。
+   * 全量域下一条 50ms 的 span 不足 1px 宽，仅高亮等于看不见。
+   * 只在值变化时触发一次，不跟随用户后续的选中项走，避免点树时甘特乱跳。
+   */
+  revealSpanId?: string | null;
 }
 
 interface Domain {
@@ -30,7 +36,15 @@ interface Domain {
   end: number;
 }
 
-export function TraceTimeline({ spans, totalSeconds, selectedId, onSelect, onSelectCall, highlightCallId }: Props) {
+export function TraceTimeline({
+  spans,
+  totalSeconds,
+  selectedId,
+  onSelect,
+  onSelectCall,
+  highlightCallId,
+  revealSpanId,
+}: Props) {
   const groups = useMemo(() => buildGroups(spans), [spans]);
 
   // 缩放域（秒）：null = 全量。甘特图与下方两张图表各自独立缩放，互不联动。
@@ -49,6 +63,22 @@ export function TraceTimeline({ spans, totalSeconds, selectedId, onSelect, onSel
     setGanttDomain(null);
     setChartDomain(null);
   }, [spans]);
+
+  // 深链定位：把甘特域收到目标 span 所在分组（声明在复位 effect 之后，保证这一帧以它为准）
+  useEffect(() => {
+    if (!revealSpanId) return;
+    const target = spans.find((s) => s.id === revealSpanId);
+    if (!target) return;
+    const end = target.relStart + target.timelineMs / 1000;
+    const group = groups.find((g) => g.rows.some((r) => r.spans.some((s) => s.id === revealSpanId)));
+    // 以「span 本身 + 一个分组宽度的余量」为窗口，太窄时给 2s 兜底
+    const groupSpan = group ? group.endSec - group.startSec : 0;
+    const pad = Math.max(Math.min(groupSpan, (end - target.relStart) * 4), 1);
+    setGanttDomain({
+      start: Math.max(0, target.relStart - pad),
+      end: Math.min(totalSeconds, end + pad),
+    });
+  }, [revealSpanId, spans, groups, totalSeconds]);
 
   // 滚轮缩放：以鼠标位置为锚点；按光标所在区域（data-zoom-scope）作用于甘特图或图表
   useEffect(() => {

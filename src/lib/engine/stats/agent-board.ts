@@ -1,27 +1,31 @@
 import { Prisma, PrismaClient } from "@prisma/client";
 import { normalizeRow } from "./range";
 import { HEALTH_WINDOW_DAYS, scoreHealth, successRateOf, type HealthScore } from "./health";
+import { SQL_BAD, SQL_FINISHED, SQL_PARTIAL } from "./session-outcome";
 
 /**
  * Agent 看板聚合（管理视角）。
  *
  * 回答四类问题：
- *   1. 横向对比 —— 谁用得多、谁用得好、谁成本高（矩阵表）
- *   2. 活跃分层 —— 今日/近7天/近30天各有几个 Agent 在跑，谁沉默了
- *   3. 使用趋势 —— 会话数 / Token / 失败会话数的时间序列
- *   4. 健康画像 —— 四维打分（见 health.ts）
+ *   1. 横向对比 —— 谁用得多、谁用得好、谁成本高（矩阵表 + 会话数/工具失败率柱图）
+ *   2. 使用趋势 —— 会话数 / Token / 失败会话数的时间序列
+ *   3. 健康画像 —— 四维打分（见 health.ts）
  *
  * 口径三条例规：
  * - 时间过滤一律用 Session.startTime（发生时间）。禁用 Span.createdAt ——
  *   它是入库时间，全库都落在最近 10 天内，会把几个月前的会话算进「近 30 天」。
- * - 失败会话 = errorCount > 0 OR status = 'error'；status='active' 不计入成功率分母。
- *   上传链路永远写 'completed'，按 status 算成功率会严重失真。
+ * - 会话成败一律用 Session.outcome（success / partial / failed），不再用 errorCount：
+ *   errorCount 统计的是「过程失败」（工具重试、质检回流），拿它判会话失败会把
+ *   「最终交付了成品」的会话误判为失败。outcome='' 表示历史未回填，按旧口径兜底。
+ *   status='active' 与空会话（totalSpans=0）不计入成功率分母。
  * - 成本 = input + output，不含 cache（缓存命中高是优点，不是成本）。
  */
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** 日序列窗口固定 30 天，供 Sparkline 与活跃分层卡使用，与页面 range 解耦 */
+/** 日序列窗口固定 30 天，供矩阵表的 Sparkline 使用，与页面 range 解耦 */
 const SERIES_DAYS = 30;
+
+/* 会话成败口径见 ./session-outcome.ts（与 agent-detail / trend 共用同一份） */
 
 export interface AgentBoardKpi {
   /** 区间内有会话的 Agent 数 */
@@ -37,6 +41,8 @@ export interface AgentBoardKpi {
   successRate: number;
   successRatePrev: number | null;
   badSessions: number;
+  /** 范围内部分会话数（有交付但过程有失败） */
+  partialSessions: number;
   /** 会话端到端耗时 P95（ms）；样本不足为 0 */
   p95Duration: number;
   /** P95 的有效样本数 */
@@ -61,6 +67,8 @@ export interface AgentBoardRow {
   finishedSessions: number;
   /** errorCount>0 或 status='error' 的会话数 */
   badSessions: number;
+  /** 有交付但过程出现失败的会话数（按半失败折算进成功率） */
+  partialSessions: number;
   /** 真实成功率 0-100；无样本为 null */
   successRate: number | null;
   users: number;
@@ -102,15 +110,6 @@ export interface AgentBoardRow {
   health: HealthScore;
 }
 
-export interface ActiveWindow {
-  key: "1d" | "7d" | "30d";
-  label: string;
-  activeAgents: number;
-  sessions: number;
-  /** 该窗口内每日活跃 Agent 数，供 Sparkline */
-  dailyAgents: number[];
-}
-
 export interface AgentBoard {
   range: string;
   rangeKey: string;
@@ -118,7 +117,6 @@ export interface AgentBoard {
   /** 近 30 天日期键 YYYY-MM-DD（升序），与 row.daily 对齐 */
   days: string[];
   kpi: AgentBoardKpi;
-  windows: ActiveWindow[];
   agents: AgentBoardRow[];
   /** 本期新增（首次出现落在区间内）与本期消失（上期有、本期 0） */
   newAgents: string[];
@@ -157,6 +155,7 @@ type Agg = {
   sessions: number;
   finishedSessions: number;
   badSessions: number;
+  partialSessions: number;
   totalTokens: number;
   billableTokens: number;
   cacheTokens: number;
@@ -190,8 +189,9 @@ async function measure(
     prisma.$queryRaw<Record<string, unknown>[]>`
       SELECT a.id AS id,
              COUNT(s.id) AS sessions,
-             COALESCE(SUM(CASE WHEN s.status <> 'active' THEN 1 ELSE 0 END), 0) AS finishedSessions,
-             COALESCE(SUM(CASE WHEN s.errorCount > 0 OR s.status = 'error' THEN 1 ELSE 0 END), 0) AS badSessions,
+             COALESCE(SUM(CASE WHEN ${SQL_FINISHED} THEN 1 ELSE 0 END), 0) AS finishedSessions,
+             COALESCE(SUM(CASE WHEN ${SQL_BAD} THEN 1 ELSE 0 END), 0) AS badSessions,
+             COALESCE(SUM(CASE WHEN ${SQL_PARTIAL} THEN 1 ELSE 0 END), 0) AS partialSessions,
              COALESCE(SUM(s.totalTokens), 0) AS totalTokens,
              COALESCE(SUM(s.totalInputTokens + s.totalOutputTokens), 0) AS billableTokens,
              COALESCE(SUM(s.totalCacheReadTokens + s.totalCacheWriteTokens), 0) AS cacheTokens,
@@ -259,6 +259,7 @@ async function measure(
       sessions: Number(r.sessions),
       finishedSessions: Number(r.finishedSessions),
       badSessions: Number(r.badSessions),
+      partialSessions: Number(r.partialSessions),
       totalTokens: Number(r.totalTokens),
       billableTokens: Number(r.billableTokens),
       cacheTokens: Number(r.cacheTokens),
@@ -342,8 +343,9 @@ export async function getAgentBoard(
       ? prisma.$queryRaw<Record<string, unknown>[]>`
           SELECT s.agentId AS agentId,
                  COUNT(*) AS sessions,
-                 COALESCE(SUM(CASE WHEN s.status <> 'active' THEN 1 ELSE 0 END), 0) AS finishedSessions,
-                 COALESCE(SUM(CASE WHEN s.errorCount > 0 OR s.status = 'error' THEN 1 ELSE 0 END), 0) AS badSessions
+                 COALESCE(SUM(CASE WHEN ${SQL_FINISHED} THEN 1 ELSE 0 END), 0) AS finishedSessions,
+                 COALESCE(SUM(CASE WHEN ${SQL_BAD} THEN 1 ELSE 0 END), 0) AS badSessions,
+                 COALESCE(SUM(CASE WHEN ${SQL_PARTIAL} THEN 1 ELSE 0 END), 0) AS partialSessions
           FROM Session s
           WHERE s.startTime >= ${prevStartMs} AND s.startTime < ${startMs}
           GROUP BY s.agentId
@@ -366,8 +368,9 @@ export async function getAgentBoard(
       ? prisma.$queryRaw<Record<string, unknown>[]>`
           SELECT COUNT(*) AS sessions,
                  COUNT(DISTINCT s.agentId) AS agents,
-                 COALESCE(SUM(CASE WHEN s.status <> 'active' THEN 1 ELSE 0 END), 0) AS finishedSessions,
-                 COALESCE(SUM(CASE WHEN s.errorCount > 0 OR s.status = 'error' THEN 1 ELSE 0 END), 0) AS badSessions
+                 COALESCE(SUM(CASE WHEN ${SQL_FINISHED} THEN 1 ELSE 0 END), 0) AS finishedSessions,
+                 COALESCE(SUM(CASE WHEN ${SQL_BAD} THEN 1 ELSE 0 END), 0) AS badSessions,
+                 COALESCE(SUM(CASE WHEN ${SQL_PARTIAL} THEN 1 ELSE 0 END), 0) AS partialSessions
           FROM Session s
           WHERE s.startTime >= ${prevStartMs} AND s.startTime < ${startMs}
         `
@@ -388,13 +391,17 @@ export async function getAgentBoard(
   ]);
 
   /* ---- 索引表 ---- */
-  const prevMap = new Map<string, { sessions: number; finishedSessions: number; badSessions: number }>();
+  const prevMap = new Map<
+    string,
+    { sessions: number; finishedSessions: number; badSessions: number; partialSessions: number }
+  >();
   for (const raw of prevAggRows) {
     const r = normalizeRow(raw);
     prevMap.set(String(r.agentId), {
       sessions: Number(r.sessions),
       finishedSessions: Number(r.finishedSessions),
       badSessions: Number(r.badSessions),
+      partialSessions: Number(r.partialSessions),
     });
   }
 
@@ -433,6 +440,7 @@ export async function getAgentBoard(
     const sessions = cur?.sessions ?? 0;
     const finishedSessions = cur?.finishedSessions ?? 0;
     const badSessions = cur?.badSessions ?? 0;
+    const partialSessions = cur?.partialSessions ?? 0;
     const rounds = cur?.rounds ?? 0;
     const tokensPerRound = rounds > 0 ? (cur?.billableTokens ?? 0) / rounds : 0;
 
@@ -444,6 +452,7 @@ export async function getAgentBoard(
       sessions: hSessions,
       finishedSessions: hAgg?.finishedSessions ?? 0,
       badSessions: hAgg?.badSessions ?? 0,
+      partialSessions: hAgg?.partialSessions ?? 0,
       toolCalls: health.span.get(a.id)?.toolCalls ?? 0,
       toolFailed: health.span.get(a.id)?.toolFailed ?? 0,
       rounds: hRounds,
@@ -472,7 +481,8 @@ export async function getAgentBoard(
       prevSessions: prevStartMs > 0 ? (prev?.sessions ?? 0) : null,
       finishedSessions,
       badSessions,
-      successRate: successRateOf(finishedSessions, badSessions),
+      partialSessions,
+      successRate: successRateOf(finishedSessions, badSessions, partialSessions),
       users: cur?.users ?? 0,
       projects: cur?.projects ?? 0,
       activeDays: cur?.activeDays ?? 0,
@@ -508,6 +518,7 @@ export async function getAgentBoard(
   const sessions = rows.reduce((s, r) => s + r.sessions, 0);
   const finishedSessions = rows.reduce((s, r) => s + r.finishedSessions, 0);
   const badSessions = rows.reduce((s, r) => s + r.badSessions, 0);
+  const partialSessions = rows.reduce((s, r) => s + r.partialSessions, 0);
   const spans = rows.reduce((s, r) => s + r.spans, 0);
   const failedSpans = rows.reduce((s, r) => s + r.failedSpans, 0);
   const totalTokens = rows.reduce((s, r) => s + r.totalTokens, 0);
@@ -516,39 +527,6 @@ export async function getAgentBoard(
   const globalP95 = globalP95Rows.length > 0 ? normalizeRow(globalP95Rows[0]) : null;
   const p95Duration = Math.round(Number(globalP95?.p95 ?? 0));
   const p95SampleCount = Number(globalP95?.cnt ?? 0);
-
-  /* ---- 活跃分层：从近 30 天日序列切窗 ---- */
-  const dayAgents: number[] = days.map(() => 0);
-  days.forEach((d, i) => {
-    let count = 0;
-    for (const r of rows) if ((dailyByAgent.get(r.id)?.get(d) ?? 0) > 0) count++;
-    dayAgents[i] = count;
-  });
-
-  const windows: ActiveWindow[] = ([
-    { key: "1d", label: "今日", size: 1 },
-    { key: "7d", label: "近7天", size: 7 },
-    { key: "30d", label: "近30天", size: 30 },
-  ] as const).map((w) => {
-    const slice = days.slice(-w.size);
-    const set = new Set<string>();
-    let winSessions = 0;
-    for (const r of rows) {
-      const dmap = dailyByAgent.get(r.id);
-      if (!dmap) continue;
-      let hit = 0;
-      for (const d of slice) hit += dmap.get(d) ?? 0;
-      if (hit > 0) set.add(r.id);
-      winSessions += hit;
-    }
-    return {
-      key: w.key,
-      label: w.label,
-      activeAgents: set.size,
-      sessions: winSessions,
-      dailyAgents: dayAgents.slice(-w.size),
-    };
-  });
 
   const newAgents =
     startMs > 0
@@ -568,12 +546,17 @@ export async function getAgentBoard(
       silentAgents: rows.length - activeAgents,
       sessions,
       sessionsPrev: prevTotals ? Number(prevTotals.sessions) : null,
-      successRate: successRateOf(finishedSessions, badSessions) ?? 100,
+      successRate: successRateOf(finishedSessions, badSessions, partialSessions) ?? 100,
       successRatePrev:
         prevTotals && Number(prevTotals.finishedSessions) > 0
-          ? (successRateOf(Number(prevTotals.finishedSessions), Number(prevTotals.badSessions)) ?? 100)
+          ? (successRateOf(
+              Number(prevTotals.finishedSessions),
+              Number(prevTotals.badSessions),
+              Number(prevTotals.partialSessions ?? 0),
+            ) ?? 100)
           : null,
       badSessions,
+      partialSessions,
       p95Duration,
       p95SampleCount,
       spans,
@@ -581,7 +564,6 @@ export async function getAgentBoard(
       spanFailRate: spans > 0 ? (failedSpans / spans) * 100 : 0,
       totalTokens,
     },
-    windows,
     agents: rows,
     newAgents,
     lostAgents,

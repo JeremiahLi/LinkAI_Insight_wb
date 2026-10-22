@@ -1,5 +1,6 @@
 import { Prisma, PrismaClient } from "@prisma/client";
 import { normalizeRow } from "./range";
+import { SQL_BAD } from "./session-outcome";
 
 /**
  * 使用趋势统计：按天/周粒度聚合使用次数（会话数）、token 消耗与去重计数。
@@ -163,7 +164,7 @@ export async function getAgentsTrendCompare(
            a.name AS agent,
            COUNT(*) AS sessions,
            COALESCE(SUM(s.totalTokens), 0) AS tokens,
-           COALESCE(SUM(CASE WHEN s.errorCount > 0 OR s.status = 'error' THEN 1 ELSE 0 END), 0) AS failed
+           COALESCE(SUM(CASE WHEN ${SQL_BAD} THEN 1 ELSE 0 END), 0) AS failed
     FROM Session s
     JOIN Agent a ON s.agentId = a.id
     WHERE s.startTime >= ${startMs}

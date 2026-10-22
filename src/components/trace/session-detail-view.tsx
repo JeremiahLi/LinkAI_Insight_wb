@@ -1,12 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { X, Maximize2, Minimize2, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowLeft, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { SlidePanel } from "./slide-panel";
 import { TraceTimeline } from "./trace-timeline";
 import { TraceTranscript } from "./trace-transcript";
+import { OutcomeBadge } from "./shared";
 import {
   buildCalls,
   compressIdleGaps,
@@ -21,78 +21,76 @@ import {
   type CallInfo,
   type TraceSpan,
 } from "./trace-helpers";
-import { formatTokens, formatDuration } from "@/lib/format";
+import { formatDuration, formatTokens } from "@/lib/format";
 import type { SessionDetail, SpanNode, RoundNode } from "./types";
 
-interface SessionSummary {
-  id: string;
-  projectId: string;
-  projectName: string;
-  agentEmoji: string;
-  agentName: string;
-  userName: string;
-}
-
+/**
+ * Session 详情（全幅）。
+ *
+ * 从原来的右侧浮窗（TraceViewerPanel）搬过来的三栏视图：
+ *   左 Span 层级树 / 中 Timeline（甘特 + Token 图）或 Transcript / 右 Span 详情。
+ * 改成路由页之后去掉遮罩、拖拽宽度和全屏按钮，补上 404 / 加载失败分支
+ * （浮窗里 fetch 失败只是不显示，整页失败会白屏）。
+ *
+ * 支持 ?spanId=xxx 直达：从「失败样例」这类深链进来时自动选中并滚动到该 span。
+ */
 interface Props {
-  session: SessionSummary | null;
-  open: boolean;
-  onClose: () => void;
+  sessionId: string;
+  onBack?: () => void;
 }
 
-export function TraceViewerPanel({ session, open, onClose }: Props) {
+export function SessionDetailView({ sessionId, onBack }: Props) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
   // 选中的 Token 调用柱（view: "cum" = 累计构成 / "delta" = 本次新增构成）
   const [selectedCall, setSelectedCall] = useState<{ id: string; view: "cum" | "delta" } | null>(
     null,
   );
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [view, setView] = useState<"timeline" | "transcript">("timeline");
-  const [panelWidth, setPanelWidth] = useState(88);
-  const isDraggingWidth = useRef(false);
+  const [reloadToken, setReloadToken] = useState(0);
+  /** 深链要定位的 span：与 selectedSpanId 分开，避免用户点树时甘特反复重新聚焦 */
+  const [focusSpanId, setFocusSpanId] = useState<string | null>(null);
+  // ?spanId= 只应用一次：之后用户手动点的选中项不能被刷新/重算覆盖
+  const appliedLinkRef = useRef(false);
 
-  useEffect(() => {
-    if (session?.id) {
-      fetch(`/api/sessions/${session.id}`)
-        .then((res) => res.json())
-        .then((data) => {
-          setDetail(data);
-          setSelectedSpanId(null);
-          setSelectedCall(null);
-          setView("timeline");
-        })
-        .catch(console.error);
-    } else {
-      setDetail(null);
-    }
-  }, [session?.id]);
-
-  const handleWidthMouseDown = useCallback(() => {
-    isDraggingWidth.current = true;
-    document.body.style.cursor = "ew-resize";
-    document.body.style.userSelect = "none";
-  }, []);
-
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (isDraggingWidth.current) {
-        const vw = window.innerWidth;
-        const pct = ((vw - e.clientX) / vw) * 100;
-        setPanelWidth(Math.min(Math.max(pct, 60), 98));
+  const fetchDetail = useCallback(async () => {
+    setLoading(true);
+    setNotFound(false);
+    setErrorMsg(null);
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}`);
+      if (res.status === 404) {
+        setNotFound(true);
+        setDetail(null);
+        return;
       }
-    };
-    const handleMouseUp = () => {
-      isDraggingWidth.current = false;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, []);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: SessionDetail = await res.json();
+      if (!data || !Array.isArray(data.rounds)) throw new Error("响应结构异常");
+      setDetail(data);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+      setDetail(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [sessionId]);
+
+  // 换会话时彻底重置视图状态
+  useEffect(() => {
+    setSelectedSpanId(null);
+    setSelectedCall(null);
+    setFocusSpanId(null);
+    setView("timeline");
+    appliedLinkRef.current = false;
+  }, [sessionId]);
+
+  useEffect(() => {
+    fetchDetail();
+  }, [fetchDetail, reloadToken]);
 
   const spans = useMemo(
     () => (detail ? compressIdleGaps(flattenSession(detail)) : []),
@@ -129,31 +127,87 @@ export function TraceViewerPanel({ session, open, onClose }: Props) {
     [spans],
   );
 
-  if (!session || !detail) return null;
+  // ?spanId= 只应用一次：之后用户手动点的选中项不能被刷新/重算覆盖
+  useEffect(() => {
+    if (appliedLinkRef.current || spans.length === 0) return;
+    appliedLinkRef.current = true;
+    const spanId = new URLSearchParams(window.location.search).get("spanId");
+    if (!spanId) return;
+    // 不在拍平结果里（例如带 branchId 但该 Round 没有 fork 点的 span）就静默退回会话顶部
+    if (!spans.some((s) => s.id === spanId)) return;
+
+    setSelectedSpanId(spanId);
+    setFocusSpanId(spanId);
+    setSelectedCall(null);
+    // 参数用完即清，避免刷新后总被拽回这一条
+    const url = new URL(window.location.href);
+    url.searchParams.delete("spanId");
+    window.history.replaceState(null, "", url.pathname + url.search);
+
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-span-id="${CSS.escape(spanId)}"]`);
+      el?.scrollIntoView({ block: "center" });
+    });
+  }, [spans]);
+
+  if (loading) {
+    return (
+      <div className="flex h-[calc(100vh-56px)] items-center justify-center">
+        <p className="text-sm text-muted-foreground">加载中...</p>
+      </div>
+    );
+  }
+
+  if (notFound || errorMsg || !detail) {
+    return (
+      <div className="flex h-[calc(100vh-56px)] flex-col items-center justify-center gap-3">
+        <p className="text-sm text-muted-foreground">
+          {notFound ? `Session 未找到：${sessionId}` : `加载失败：${errorMsg ?? "未知错误"}`}
+        </p>
+        <div className="flex items-center gap-2">
+          {!notFound && (
+            <Button variant="outline" size="sm" onClick={() => setReloadToken((v) => v + 1)}>
+              <RefreshCw className="h-3.5 w-3.5" />
+              重试
+            </Button>
+          )}
+          {onBack && (
+            <Button variant="outline" size="sm" onClick={onBack}>
+              返回列表
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <SlidePanel
-      open={open}
-      onClose={onClose}
-      width={panelWidth}
-      isFullscreen={isFullscreen}
-      minWidth="1100px"
-      maxWidth="1760px"
-    >
-      <div
-        onMouseDown={handleWidthMouseDown}
-        className="absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-primary/30 transition-colors z-10"
-      />
-
-      {/* Header：统计条 */}
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-border bg-card px-5">
-        <div className="flex min-w-0 items-center gap-5">
+    <div className="flex h-[calc(100vh-56px)] flex-col overflow-hidden">
+      {/* Header：统计条（窄屏换行，不再固定单行） */}
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-5 gap-y-1.5 border-b border-border bg-card px-5 py-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1.5">
+          {onBack && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="-ml-2 h-7 gap-1 px-2 text-xs text-muted-foreground"
+              onClick={onBack}
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              返回
+            </Button>
+          )}
           <div className="flex min-w-0 items-center gap-2">
             <span className="text-base shrink-0">{detail.agentEmoji}</span>
-            <h1 className="truncate text-base font-semibold tracking-tight">{detail.agentName}</h1>
-            <span className="truncate text-sm text-muted-foreground">· {detail.projectName}</span>
+            {/* 标题优先：没有标题时退回 Agent 名，避免出现空 h1 */}
+            <h1 className="truncate text-base font-semibold tracking-tight">
+              {detail.title || detail.agentName}
+            </h1>
+            <span className="truncate text-sm text-muted-foreground" title={detail.id}>
+              · {detail.agentName} · {detail.projectName} · {detail.userName} · #{detail.id.slice(0, 8)}
+            </span>
           </div>
-          <div className="flex items-center gap-4 text-sm">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
             <StatChip label="耗时" value={formatDuration(detail.totalDuration)} />
             <StatChip
               label="In"
@@ -167,6 +221,8 @@ export function TraceViewerPanel({ session, open, onClose }: Props) {
             />
             <StatChip label="Total" value={formatTokens(detail.totalTokens)} />
             <StatChip label="LLM" value={String(llmCount)} />
+            {/* 终态与「过程失败」分开看：过程有失败不代表会话失败 */}
+            <OutcomeBadge outcome={detail.outcome ?? ""} status={detail.status} />
             <StatChip
               label="Tool"
               value={
@@ -200,11 +256,14 @@ export function TraceViewerPanel({ session, open, onClose }: Props) {
               Transcript
             </Button>
           </div>
-          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setIsFullscreen(!isFullscreen)}>
-            {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-          </Button>
-          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onClose}>
-            <X className="h-4 w-4" />
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            title="刷新"
+            onClick={() => setReloadToken((v) => v + 1)}
+          >
+            <RefreshCw className="h-4 w-4" />
           </Button>
         </div>
       </header>
@@ -212,7 +271,7 @@ export function TraceViewerPanel({ session, open, onClose }: Props) {
       {/* 主体：三栏布局 */}
       <div className="flex flex-1 overflow-hidden">
         {/* 左：Span 层级树 */}
-        <aside className="flex w-72 shrink-0 flex-col overflow-hidden border-r border-border bg-card">
+        <aside className="flex w-64 shrink-0 flex-col overflow-hidden border-r border-border bg-card xl:w-72">
           <div className="z-10 border-b border-border bg-card px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
             Span Hierarchy
           </div>
@@ -244,6 +303,7 @@ export function TraceViewerPanel({ session, open, onClose }: Props) {
                 setSelectedSpanId(id);
               }}
               highlightCallId={highlightCallId}
+              revealSpanId={focusSpanId}
             />
           ) : (
             <TraceTranscript
@@ -255,7 +315,7 @@ export function TraceViewerPanel({ session, open, onClose }: Props) {
         </main>
 
         {/* 右：Span 详情 */}
-        <aside className="w-96 shrink-0 overflow-y-auto scrollbar-thin border-l border-border bg-card">
+        <aside className="w-[340px] shrink-0 overflow-y-auto scrollbar-thin border-l border-border bg-card xl:w-96">
           <div className="sticky top-0 z-10 border-b border-border bg-card p-3">
             <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
               {selectedCall ? "Token 构成明细" : "Span 详情"}
@@ -279,7 +339,7 @@ export function TraceViewerPanel({ session, open, onClose }: Props) {
           </div>
         </aside>
       </div>
-    </SlidePanel>
+    </div>
   );
 }
 
@@ -306,10 +366,9 @@ function StatusBadge({ status }: { status: string }) {
     <span
       className={cn(
         "rounded-full border px-2.5 py-1 text-xs font-medium",
-        status === "active" && "border-[var(--trace-tool)]/40 bg-[var(--trace-tool)]/10 text-[var(--trace-tool)]",
-        status === "error" && "border-destructive/40 bg-destructive/10 text-destructive",
-        status !== "active" && status !== "error" &&
-          "border-[var(--trace-tool)]/40 bg-[var(--trace-tool)]/10 text-[var(--trace-tool)]",
+        status === "error"
+          ? "border-destructive/40 bg-destructive/10 text-destructive"
+          : "border-[var(--trace-tool)]/40 bg-[var(--trace-tool)]/10 text-[var(--trace-tool)]",
       )}
     >
       {text}
@@ -477,6 +536,7 @@ function TreeItem({
 
   return (
     <div
+      data-span-id={span.id}
       onClick={(e) => {
         e.stopPropagation();
         onSelect(span.id);
@@ -602,7 +662,20 @@ function SpanDetails({ span, totalSeconds }: { span: TraceSpan; totalSeconds: nu
             <Pre text={span.output} />
           </div>
         )}
-        {!span.input && !span.output && !failed && (
+        {/* 采集端附加字段：老详情页的 SpanDetailPanel 有，浮窗里缺，这里补回来 */}
+        {span.content && (
+          <div>
+            <span className="text-xs text-muted-foreground">内容</span>
+            <Pre text={span.content} />
+          </div>
+        )}
+        {span.details && (
+          <div>
+            <span className="text-xs text-muted-foreground">附加明细</span>
+            <Pre text={span.details} />
+          </div>
+        )}
+        {!span.input && !span.output && !span.content && !span.details && !failed && (
           <p className="text-xs text-muted-foreground">该 Span 无记录内容</p>
         )}
         <div className="font-mono text-[10px] text-muted-foreground/70">Span ID: {span.id}</div>

@@ -53,6 +53,13 @@ model Session {
   userId           String
   agentId          String
   status           String   @default("active")
+  /// 会话标题：首条用户诉求截断（采集端未提供时的派生值），空串表示尚未计算
+  title            String   @default("")
+  /// 会话终态：success / partial / failed；空串表示未知（历史数据未回填）
+  /// - success：末条 answer 成功且有输出，过程中无致命失败
+  /// - partial：末条 answer 成功且有输出，但过程中出现过失败（工具重试、校验回流）
+  /// - failed ：无 answer，或末条 answer 失败/空输出
+  outcome          String   @default("")
   model            String   @default("")
   startTime        DateTime @default(now())
   endTime          DateTime?

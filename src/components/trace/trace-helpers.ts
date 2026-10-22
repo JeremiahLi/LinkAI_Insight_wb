@@ -15,6 +15,8 @@ export interface TraceSpan {
   output?: string;
   error?: string;
   details?: string;
+  /** 采集端附加的内容段（技能说明 / 回答正文等）；老详情页有，这里一并透传 */
+  content?: string;
   startTime: number; // epoch ms
   relStart: number; // 距会话起点的秒数（>= 0）
   durationMs: number; // 展示用时长（tool/answer 有细分时长时优先）
@@ -56,6 +58,7 @@ export function flattenSession(detail: SessionDetail): TraceSpan[] {
       output: span.output,
       error: span.error,
       details: span.details,
+      content: span.content,
       startTime: span.startTime,
       durationMs: displayDurationMs(span),
       timelineMs: span.duration,

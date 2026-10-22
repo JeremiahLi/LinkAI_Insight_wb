@@ -2,6 +2,7 @@ import { Prisma, PrismaClient } from "@prisma/client";
 import { normalizeRow } from "./range";
 import { scoreHealth, successRateOf, HEALTH_WINDOW_DAYS, type HealthScore } from "./health";
 import { getAgentBoard, type AgentBoardRow } from "./agent-board";
+import { SQL_BAD, SQL_FINISHED, SQL_PARTIAL } from "./session-outcome";
 import { buildBucketKeys, bucketLabel, type TrendGranularity } from "./trend";
 
 /**
@@ -44,8 +45,8 @@ export interface AgentIssue {
   evidence: string[];
   /** 建议动作 */
   suggestion: string;
-  /** 深链，指向 /trace/{sessionId} */
-  links: { sessionId: string; label: string }[];
+  /** 深链，指向 /trace/{sessionId}?spanId={spanId}（无 spanId 时落到会话顶部） */
+  links: { sessionId: string; label: string; spanId?: string }[];
 }
 
 export interface AgentTopItem {
@@ -78,6 +79,8 @@ export interface AgentDetailTotals {
   finishedSessions: number;
   activeSessions: number;
   badSessions: number;
+  /** 有交付但过程出现失败的会话数（按半失败折算进成功率） */
+  partialSessions: number;
   successRate: number | null;
   spans: number;
   failedSpans: number;
@@ -118,7 +121,7 @@ export interface AgentDetail {
   topUsers: AgentTopItem[];
   topProjects: AgentTopItem[];
   topModels: AgentTopItem[];
-  errorClusters: { pattern: string; count: number; sample: string; sessionId: string }[];
+  errorClusters: { pattern: string; count: number; sample: string; sessionId: string; spanId?: string }[];
   slowSpans: {
     id: string;
     sessionId: string;
@@ -224,9 +227,10 @@ export async function getAgentDetail(
     // D2 区间 totals
     prisma.$queryRaw<Record<string, unknown>[]>`
       SELECT COUNT(*) AS sessions,
-             COALESCE(SUM(CASE WHEN s.status <> 'active' THEN 1 ELSE 0 END), 0) AS finishedSessions,
+             COALESCE(SUM(CASE WHEN ${SQL_FINISHED} THEN 1 ELSE 0 END), 0) AS finishedSessions,
              COALESCE(SUM(CASE WHEN s.status = 'active' THEN 1 ELSE 0 END), 0) AS activeSessions,
-             COALESCE(SUM(CASE WHEN s.errorCount > 0 OR s.status = 'error' THEN 1 ELSE 0 END), 0) AS badSessions,
+             COALESCE(SUM(CASE WHEN ${SQL_BAD} THEN 1 ELSE 0 END), 0) AS badSessions,
+             COALESCE(SUM(CASE WHEN ${SQL_PARTIAL} THEN 1 ELSE 0 END), 0) AS partialSessions,
              COALESCE(SUM(s.totalTokens), 0) AS totalTokens,
              COALESCE(SUM(s.totalInputTokens), 0) AS inputTokens,
              COALESCE(SUM(s.totalOutputTokens), 0) AS outputTokens,
@@ -320,7 +324,7 @@ export async function getAgentDetail(
                s.totalInputTokens AS inTok,
                s.totalOutputTokens AS outTok,
                s.totalCacheReadTokens + s.totalCacheWriteTokens AS cacheTok,
-               CASE WHEN s.errorCount > 0 OR s.status = 'error' THEN 1 ELSE 0 END AS bad
+               CASE WHEN ${SQL_BAD} THEN 1 ELSE 0 END AS bad
         FROM Session s
         WHERE s.agentId = ${agentId} AND s.startTime >= ${startMs}
       ),
@@ -357,6 +361,7 @@ export async function getAgentDetail(
   const sessions = Number(t?.sessions ?? 0);
   const finishedSessions = Number(t?.finishedSessions ?? 0);
   const badSessions = Number(t?.badSessions ?? 0);
+  const partialSessions = Number(t?.partialSessions ?? 0);
   const spanAgg = spanAggRows.length > 0 ? normalizeRow(spanAggRows[0]) : null;
   const spans = Number(spanAgg?.spans ?? 0);
   const failedSpans = Number(spanAgg?.failedSpans ?? 0);
@@ -368,7 +373,8 @@ export async function getAgentDetail(
     finishedSessions,
     activeSessions: Number(t?.activeSessions ?? 0),
     badSessions,
-    successRate: successRateOf(finishedSessions, badSessions),
+    partialSessions,
+    successRate: successRateOf(finishedSessions, badSessions, partialSessions),
     spans,
     failedSpans,
     spanFailRate: spans > 0 ? (failedSpans / spans) * 100 : 0,
@@ -423,6 +429,7 @@ export async function getAgentDetail(
   const failedSpansList = failedSpanRows.map((raw) => {
     const r = normalizeRow(raw);
     return {
+      spanId: String(r.id),
       sessionId: String(r.sessionId),
       kind: String(r.kind),
       name: String(r.name || ""),
@@ -431,7 +438,7 @@ export async function getAgentDetail(
     };
   });
 
-  const clusterMap = new Map<string, { count: number; sample: string; sessionId: string }>();
+  const clusterMap = new Map<string, { count: number; sample: string; sessionId: string; spanId: string }>();
   let emptyErrorCount = 0;
   for (const f of failedSpansList) {
     if (!f.error.trim()) {
@@ -445,12 +452,24 @@ export async function getAgentDetail(
     }
     const hit = clusterMap.get(pattern);
     if (hit) hit.count++;
-    else clusterMap.set(pattern, { count: 1, sample: f.error.trim().slice(0, 200), sessionId: f.sessionId });
+    else
+      clusterMap.set(pattern, {
+        count: 1,
+        sample: f.error.trim().slice(0, 200),
+        sessionId: f.sessionId,
+        spanId: f.spanId,
+      });
   }
 
   const totalFailedSample = failedSpansList.length || 1;
   const errorClusters = Array.from(clusterMap.entries())
-    .map(([pattern, v]) => ({ pattern, count: v.count, sample: v.sample, sessionId: v.sessionId }))
+    .map(([pattern, v]) => ({
+      pattern,
+      count: v.count,
+      sample: v.sample,
+      sessionId: v.sessionId,
+      spanId: v.spanId,
+    }))
     .sort((a, b) => b.count - a.count);
 
   /* ---- 慢 span ---- */
@@ -546,6 +565,7 @@ export async function getAgentDetail(
       suggestion: `检查该工具入参构造（命令拼接、引号转义、路径存在性）；失败率超过 20% 时应优先处理。`,
       links: toolFailSpans.slice(0, 3).map((f, i) => ({
         sessionId: f.sessionId,
+        spanId: f.spanId,
         label: `失败样例 ${i + 1}`,
       })),
     });
@@ -566,7 +586,7 @@ export async function getAgentDetail(
         `样例：${c.sample.slice(0, 160)}`,
       ],
       suggestion: "同一模式重复出现通常是一个可修的确定性问题（权限、路径、依赖缺失），按样例定位后统一修复。",
-      links: [{ sessionId: c.sessionId, label: "样例会话" }],
+      links: [{ sessionId: c.sessionId, spanId: c.spanId, label: "样例会话" }],
     });
   }
 
@@ -584,7 +604,7 @@ export async function getAgentDetail(
         `超过 P95 的 span 共 ${slowSpans.length} 个（仅展示前 10）`,
       ],
       suggestion: "检查该工具/命令的超时设置与输入规模；长尾往往来自单次超大输入或外部命令阻塞。",
-      links: slowSpans.slice(0, 3).map((s) => ({ sessionId: s.sessionId, label: `${s.name}` })),
+      links: slowSpans.slice(0, 3).map((s) => ({ sessionId: s.sessionId, spanId: s.id, label: `${s.name}` })),
     });
   }
 

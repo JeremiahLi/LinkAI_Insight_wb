@@ -24,6 +24,7 @@ export function FancyBarChartH({
   valueFormatter,
   ariaLabel,
   yAxisInterval,
+  xInteger,
 }: {
   data: { name: string; value: number }[];
   valueFormatter: (v: number) => string;
@@ -33,6 +34,12 @@ export function FancyBarChartH({
    * 看起来像"某几根柱子没有名字"。行数固定且不多时传 0 强制全显示。
    */
   yAxisInterval?: number;
+  /**
+   * X 轴只出整数刻度。计数类指标（如会话数）最大只有个位数时，
+   * 自动分档会画出 0.75 / 1.5 这种刻度；且刻度与条尾标注共用同一个 formatter，
+   * 四舍五入后会出现重复标签。
+   */
+  xInteger?: boolean;
 }) {
   const colors = useChartColors();
   const palette = useCategoryPalette();
@@ -41,7 +48,13 @@ export function FancyBarChartH({
     <ResponsiveContainer width="100%" height="100%">
       <BarChart data={data} layout="vertical" margin={{ top: 4, right: 56, left: 0, bottom: 0 }} barCategoryGap="28%">
         <CartesianGrid strokeDasharray="3 3" stroke={colors.grid} horizontal={false} />
-        <XAxis type="number" tick={{ fontSize: 11, fill: colors.text }} axisLine={false} tickLine={false} />
+        <XAxis
+          type="number"
+          tick={{ fontSize: 11, fill: colors.text }}
+          axisLine={false}
+          tickLine={false}
+          allowDecimals={xInteger ? false : undefined}
+        />
         <YAxis
           type="category"
           dataKey="name"

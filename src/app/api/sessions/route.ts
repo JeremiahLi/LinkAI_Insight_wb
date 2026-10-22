@@ -49,6 +49,8 @@ export async function GET() {
     agentName: s.agent.name,
     agentEmoji: s.agent.emoji,
     status: s.status,
+    title: s.title,
+    outcome: s.outcome,
     model: s.model,
     startTime: s.startTime,
     totalRounds: s.totalRounds,

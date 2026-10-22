@@ -67,6 +67,10 @@ export interface SessionDetail {
   agentName: string;
   agentEmoji: string;
   status: string;
+  /** 会话标题（首条用户诉求），空串表示采集端未提供且无法派生 */
+  title: string;
+  /** success / partial / failed / 空串=未知 */
+  outcome: string;
   model: string;
   startTime: string;
   endTime: string | null;
@@ -81,43 +85,4 @@ export interface SessionDetail {
   totalDuration: number;
   forkCount: number;
   rounds: RoundNode[];
-}
-
-export interface SessionOverviewData {
-  id: string;
-  totalRounds: number;
-  totalSpans: number;
-  errorCount: number;
-  totalInputTokens: number;
-  totalOutputTokens: number;
-  totalCacheReadTokens: number;
-  totalCacheWriteTokens: number;
-  totalTokens: number;
-  totalDuration: number;
-  model: string;
-  status: string;
-  rounds: Array<{
-    index: number;
-    turns: Array<{
-      turnId: number;
-      spans: Array<{
-        id: string;
-        tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
-        kind: string;
-        name: string;
-        status: string;
-        error?: string;
-      }>;
-    }>;
-    branches?: Array<{
-      spans: Array<{
-        id: string;
-        tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
-        kind: string;
-        name: string;
-        status: string;
-        error?: string;
-      }>;
-    }>;
-  }>;
 }

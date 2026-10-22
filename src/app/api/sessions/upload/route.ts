@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { computeOutcome, deriveAgentName, deriveTitle, workspaceLabel } from "@/lib/engine/ingest/derive";
+
+/** 无任何线索时使用的框架名兜底（也是 Agent.framework 的默认值，不要与实例名混用） */
+const FALLBACK_AGENT_NAME = "pi-coding-agent";
 
 
 export async function POST(request: Request) {
@@ -7,6 +11,10 @@ export async function POST(request: Request) {
     sessionID?: string;
     userId?: string;
     projectId?: string;
+    /** 采集端上报的 Agent 实例名；缺省时从 span 内容反推工作目录名 */
+    agentName?: string;
+    /** 采集端上报的可读项目名；缺省时从 span 内容反推工作目录名 */
+    projectName?: string;
     startedAt?: string;
     endedAt?: string;
     model?: string;
@@ -71,7 +79,19 @@ function toIntOr(v: unknown, fallback: number): number {
 }
 
   var sessionStartSpan = inSpans.find(function(s: any) { return s.kind === 'session_start'; });
-  var agentName = (sessionStartSpan && sessionStartSpan.agent_name) || 'pi-coding-agent';
+
+  // Agent 实例名四级兜底：session_start.agent_name → span.agent_name（逐条上报）
+  // → 工作目录 basename（从 tool_call 路径反推）→ 框架名。
+  // 实测全库 session_start 为 0 条，因此 cwd 反推是历史数据唯一的可读名字来源。
+  const agentName = deriveAgentName(
+    inSpans,
+    (sessionStartSpan && sessionStartSpan.agent_name) || body.agentName || null,
+    FALLBACK_AGENT_NAME,
+  );
+
+  // 项目名同源推导：旧代码把 Project.name 直接写成 projectId，列表里全是 16 位 hex
+  const projectName =
+    (body.projectName && body.projectName.trim()) || workspaceLabel(inSpans) || projectId;
 
   // session.startTime 兜底：会话不可能晚于自己最早的一条 Span 开始。
   // 若 payload 的 startedAt 晚于最早 Span（例如采集端把首次上传时间当作 startedAt），
@@ -99,23 +119,23 @@ function toIntOr(v: unknown, fallback: number): number {
       create: { id: userId, name: userId, org: "" },
     });
 
-    const agent = await prisma.agent.upsert({
-      where: { name: agentName },
-      update: { version: agentVersion },
-      create: {
-        id: agentId || undefined,
-        name: agentName,
-        version: agentVersion,
-        emoji: "🤖",
-        description: "",
-        framework: "pi-coding-agent",
-      },
+    // Agent 归属：先按客户端给的 agent_id 命中（同一实例改名不新建记录），
+    // 再按 name 命中，最后 create。旧实现用 upsert({ where: { name } }) 且 create 时带
+    // 客户端 id，一旦真名分开而 id 相同就会主键冲突整包 500。
+    const agent = await resolveAgent(agentName, agentId, agentVersion);
+
+    // 项目名只在「当前还是 hex / 等于 id」时才刷新，避免覆盖人工改名
+    const existingProject = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { name: true },
     });
+    const shouldRenameProject =
+      projectName !== projectId && (!existingProject || existingProject.name === projectId);
 
     const { id: projectIdDb } = await prisma.project.upsert({
       where: { id: projectId },
-      update: {},
-      create: { id: projectId, name: projectId, userId: userIdDb, agentId: agent.id },
+      update: shouldRenameProject ? { name: projectName } : {},
+      create: { id: projectId, name: projectName, userId: userIdDb, agentId: agent.id },
     });
 
     // 1. 先确保 session 存在（用最小的数据 insert，不覆盖统计字段）
@@ -130,6 +150,8 @@ function toIntOr(v: unknown, fallback: number): number {
         userId: userIdDb,
         agentId: agent.id,
         status: "active",
+        // 首次就能推出可读名时直接写入，避免历史脏归属
+        title: deriveTitle(inSpans),
         startTime: new Date(resolvedStartMs ?? Date.now()),
         endTime: endedAt ? new Date(endedAt) : new Date(),
       },
@@ -215,9 +237,12 @@ function toIntOr(v: unknown, fallback: number): number {
       where: { sessionId: sessionID },
       select: {
         roundIndex: true,
+        turnId: true,
         kind: true,
         status: true,
         duration: true,
+        input: true,
+        output: true,
         inputTokens: true,
         outputTokens: true,
         cacheReadTokens: true,
@@ -249,13 +274,26 @@ function toIntOr(v: unknown, fallback: number): number {
     // 只允许 round/spans 数值增长，防止并发上传时用旧数据覆盖新数据
     const existingSession = await prisma.session.findUnique({
       where: { id: sessionID },
-      select: { totalRounds: true, totalSpans: true },
+      select: { totalRounds: true, totalSpans: true, title: true, agent: { select: { name: true } } },
     });
+
+    // 终态以库内全量 span 为准（增量上传时本次 payload 往往只有尾部）
+    const { outcome } = computeOutcome(allSpans);
+    // 标题用库内全量算，已有值不覆盖（用户诉求不会变）
+    const titleFromDb = existingSession?.title ? "" : deriveTitle(allSpans);
+
+    // Agent 归属修正：能从 cwd 推出真名、而当前还挂在框架名兜底记录上时，改挂过去
+    const shouldReassignAgent =
+      agentName !== FALLBACK_AGENT_NAME && existingSession?.agent?.name === FALLBACK_AGENT_NAME;
 
     await prisma.session.update({
       where: { id: sessionID },
       data: {
-        status: "completed",
+        // status 由终态决定：只有真失败才置 error，partial 仍算完成（有交付）
+        status: outcome === "failed" ? "error" : "completed",
+        ...(titleFromDb ? { title: titleFromDb } : {}),
+        ...(outcome ? { outcome } : {}),
+        ...(shouldReassignAgent ? { agentId: agent.id } : {}),
         model: model || "",
         endTime: endedAt ? new Date(endedAt) : new Date(),
         totalRounds: Math.max(roundIndices.size, existingSession?.totalRounds ?? 0),
@@ -273,6 +311,8 @@ function toIntOr(v: unknown, fallback: number): number {
     return NextResponse.json({
       ok: true,
       sessionId: sessionID,
+      agent: agent.name,
+      outcome,
       totalSpans: allSpans.length,
       insertedNew: insertedCount,
     });
@@ -281,5 +321,52 @@ function toIntOr(v: unknown, fallback: number): number {
     const stack = err instanceof Error ? err.stack : undefined;
     console.error("[upload] " + message, stack);
     return NextResponse.json({ error: "Upload failed", detail: message, stack }, { status: 500 });
+  }
+}
+
+/**
+ * Agent 归属解析：id 优先 → name 次之 → 新建。
+ *
+ * 为什么不直接用 upsert({ where: { name } })：
+ * Agent.name 是 unique，而 create 时又允许客户端指定 id。当采集端开始上报真实
+ * 实例名、但多个实例仍共用同一个 pi 安装 id 时，create 会主键冲突导致整包 500。
+ * 这里把两种键分开匹配，冲突时降级为「按 name 复用 / 不指定 id 新建」。
+ */
+async function resolveAgent(agentName: string, agentId: string | null, agentVersion: string) {
+  if (agentId) {
+    const byId = await prisma.agent.findUnique({ where: { id: agentId } });
+    if (byId) {
+      if (byId.name === agentName && byId.version === agentVersion) return byId;
+      // 改名可能撞上别的记录的 unique 约束，失败则保留原记录
+      return prisma.agent
+        .update({ where: { id: byId.id }, data: { name: agentName, version: agentVersion } })
+        .catch(() => byId);
+    }
+  }
+
+  const byName = await prisma.agent.findUnique({ where: { name: agentName } });
+  if (byName) {
+    if (byName.version === agentVersion) return byName;
+    return prisma.agent.update({ where: { id: byName.id }, data: { version: agentVersion } });
+  }
+
+  const create = (id?: string) =>
+    prisma.agent.create({
+      data: {
+        ...(id ? { id } : {}),
+        name: agentName,
+        version: agentVersion,
+        emoji: "🤖",
+        description: "",
+        framework: FALLBACK_AGENT_NAME,
+      },
+    });
+
+  try {
+    return await create(agentId ?? undefined);
+  } catch {
+    const again = await prisma.agent.findUnique({ where: { name: agentName } });
+    if (again) return again;
+    return create();
   }
 }

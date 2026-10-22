@@ -83,6 +83,8 @@ export interface HealthInput {
   finishedSessions: number;
   /** errorCount>0 或 status='error' 的会话数 */
   badSessions: number;
+  /** 有交付但过程中出现失败的会话数（partial），按半失败折算；缺省 0 */
+  partialSessions?: number;
   toolCalls: number;
   toolFailed: number;
   rounds: number;
@@ -206,10 +208,20 @@ function costCap(framework: string, tokensPerRound: number): number {
   return 100;
 }
 
-/** 成功率（0-100）；无已完成会话时为 null。全站唯一口径入口。 */
-export function successRateOf(finishedSessions: number, badSessions: number): number | null {
+/** 成功率（0-100）；无已完成会话时为 null。全站唯一口径入口。
+ *
+ * partialSessions（有交付但过程中出现过失败）按半个失败折算：
+ * 这类会话最终交付了产物，判成失败会把「质检回流后修复」误伤成事故；
+ * 但过程中的失败确实代表质量下降，也不能当完全成功。0.5 是折中值，
+ * 与 health.ts 稳定性锚点的 97%/93% 分档配合，能把 partial 拉到 B 档附近。
+ */
+export function successRateOf(
+  finishedSessions: number,
+  badSessions: number,
+  partialSessions = 0,
+): number | null {
   if (finishedSessions <= 0) return null;
-  return clamp((1 - badSessions / finishedSessions) * 100);
+  return clamp((1 - (badSessions + partialSessions * 0.5) / finishedSessions) * 100);
 }
 
 export function gradeOf(total: number | null): HealthGrade | null {
@@ -247,6 +259,7 @@ export function scoreHealth(input: HealthInput): HealthScore {
     sessions,
     finishedSessions,
     badSessions,
+    partialSessions = 0,
     toolCalls,
     toolFailed,
     rounds,
@@ -275,7 +288,7 @@ export function scoreHealth(input: HealthInput): HealthScore {
   }
 
   /* ---- 1. 稳定性 ---- */
-  const sessionRate = successRateOf(finishedSessions, badSessions);
+  const sessionRate = successRateOf(finishedSessions, badSessions, partialSessions);
   const toolRate = toolCalls > 0 ? clamp((1 - toolFailed / toolCalls) * 100) : null;
 
   let stability: number | null;
@@ -303,7 +316,7 @@ export function scoreHealth(input: HealthInput): HealthScore {
     detail:
       sessionRate == null
         ? "窗口内没有已完成的会话，无法评估稳定性"
-        : `会话成功率 ${pct1(sessionRate)}（失败 ${badSessions} / 已完成 ${finishedSessions}）` +
+        : `会话成功率 ${pct1(sessionRate)}（失败 ${badSessions} / 部分成功 ${partialSessions} / 已完成 ${finishedSessions}，部分成功按半失败折算）` +
           (toolRate != null && toolCalls >= 5 ? `；工具失败率 ${pct1(100 - toolRate)}（${toolFailed}/${toolCalls}）` : "") +
           `。会话成功率按 97%/93% 分档（与全站成功率配色一致），70% 为异常判定边界。`,
   };
