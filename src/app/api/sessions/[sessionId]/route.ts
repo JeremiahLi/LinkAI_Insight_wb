@@ -100,6 +100,8 @@ export async function GET(
     0,
   );
   const billableTokens = session.totalInputTokens + session.totalOutputTokens;
+  // 父子链：直接子会话数（header 徽章用，省一次前端请求）
+  const childCount = await prisma.session.count({ where: { parentSessionId: sessionId } });
   const metrics = {
     billableTokens,
     totalTokens: session.totalTokens,
@@ -150,6 +152,9 @@ export async function GET(
     totalTokens: session.totalTokens,
     totalDuration: session.totalDuration,
     forkCount: session.forkCount,
+    parentSessionId: session.parentSessionId,
+    parentSpanId: session.parentSpanId,
+    childCount,
     /**
      * 会话级指标：全部由内存里的 allSpans 现算，与详情页 header 的 LLM/Tool chip 完全同源，
      * 不依赖 Session.llmCallCount 是否已回填。

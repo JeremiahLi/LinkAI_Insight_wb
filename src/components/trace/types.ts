@@ -84,6 +84,12 @@ export interface SessionDetail {
   totalTokens: number;
   totalDuration: number;
   forkCount: number;
+  /** 父会话 id（跨进程父子链）；null = 无父/未知 */
+  parentSessionId: string | null;
+  /** 父会话中派生本会话的工具调用 span id（时间窗匹配）；null = 未匹配/无父 */
+  parentSpanId: string | null;
+  /** 直接子会话数 */
+  childCount: number;
   /** 会话级指标（服务端按 Span 现算，与 header chip 同源） */
   metrics?: SessionMetrics;
   /** 同 Agent 近 30 天的中位数 / P90；null 表示基准计算失败 */

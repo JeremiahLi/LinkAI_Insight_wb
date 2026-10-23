@@ -297,7 +297,14 @@ function toIntOr(v: unknown, fallback: number): number {
     // 只允许 round/spans 数值增长，防止并发上传时用旧数据覆盖新数据
     const existingSession = await prisma.session.findUnique({
       where: { id: sessionID },
-      select: { totalRounds: true, totalSpans: true, title: true, agent: { select: { name: true } } },
+      select: {
+        totalRounds: true,
+        totalSpans: true,
+        title: true,
+        parentSpanId: true,
+        startTime: true,
+        agent: { select: { name: true } },
+      },
     });
 
     // 终态以库内全量 span 为准（增量上传时本次 payload 往往只有尾部）
@@ -309,6 +316,17 @@ function toIntOr(v: unknown, fallback: number): number {
     const shouldReassignAgent =
       agentName !== FALLBACK_AGENT_NAME && existingSession?.agent?.name === FALLBACK_AGENT_NAME;
 
+    // Span 级父子链接：时间窗匹配父会话中覆盖本会话 startTime 的工具调用 span。
+    // fill-if-empty：父会话可能晚于子会话入库（子进程先结束），每次子上传都重试；
+    // 已有值不覆盖——首次匹配视为权威，避免父 span 时间重锚定后链接漂移。
+    let parentSpanId: string | null = null;
+    if (parentSessionId && !existingSession?.parentSpanId) {
+      const childStartSec = Math.floor(
+        (existingSession?.startTime?.getTime() ?? resolvedStartMs ?? Date.now()) / 1000,
+      );
+      parentSpanId = await resolveParentSpanId(parentSessionId, childStartSec);
+    }
+
     await prisma.session.update({
       where: { id: sessionID },
       data: {
@@ -318,6 +336,7 @@ function toIntOr(v: unknown, fallback: number): number {
         ...(outcome ? { outcome } : {}),
         ...(shouldReassignAgent ? { agentId: agent.id } : {}),
         ...(parentSessionId ? { parentSessionId } : {}),
+        ...(parentSpanId ? { parentSpanId } : {}),
         model: model || "",
         endTime: endedAt ? new Date(endedAt) : new Date(),
         totalRounds: Math.max(roundIndices.size, existingSession?.totalRounds ?? 0),
@@ -334,6 +353,27 @@ function toIntOr(v: unknown, fallback: number): number {
       },
     });
 
+    // 反向补填：父会话常常最后才结束/上传，子会话此前匹配不到父 span（诚实置 null）
+    // 且自己不会再上传——这里以刚入库的本会话 spans 反向补填子会话的 parentSpanId。
+    if (allSpans.length > 0) {
+      const pendingChildren = await prisma.session.findMany({
+        where: { parentSessionId: sessionID, parentSpanId: null },
+        select: { id: true, startTime: true },
+      });
+      for (const child of pendingChildren) {
+        const spanId = await resolveParentSpanId(
+          sessionID,
+          Math.floor(child.startTime.getTime() / 1000),
+        );
+        if (spanId) {
+          await prisma.session.update({
+            where: { id: child.id },
+            data: { parentSpanId: spanId },
+          });
+        }
+      }
+    }
+
     return NextResponse.json({
       ok: true,
       sessionId: sessionID,
@@ -348,6 +388,43 @@ function toIntOr(v: unknown, fallback: number): number {
     console.error("[upload] " + message, stack);
     return NextResponse.json({ error: "Upload failed", detail: message, stack }, { status: 500 });
   }
+}
+
+/**
+ * Span 级父子链接：时间窗匹配。
+ *
+ * 为什么不做采集端 env 盖章：pi 的工具调用默认并行执行（agent-loop.ts 的
+ * Promise.all，toolExecution 从未被覆盖），同一批 tool_call 的 prepare 全部
+ * 先于 execute 串行触发，env 章会被批内后续工具覆盖，产生错误的父 span
+ * （比 null 更糟）。时间窗匹配完全在服务端：确定性、零采集端改动。
+ *
+ * 规则：在父会话 kind ∈ ('tool_call','command')（对齐 isToolKind 口径）且
+ * duration > 0 的 span 中，找 [startTime, startTime+duration] 覆盖子会话
+ * startTime 的那条。注意单位：Span.startTime 是秒，duration 是毫秒
+ * （toolDuration/agentReplyDuration 均为 Date.now() 差值），比较时换算。
+ * 并行 spawn 窗口重叠时按 startTime desc（再按 duration desc）取第一条 =
+ * 最近启动的内层窗口，是语义上最可信的 spawn 点；无命中诚实置 null。
+ */
+async function resolveParentSpanId(
+  parentSessionId: string,
+  childStartSec: number,
+): Promise<string | null> {
+  const candidates = await prisma.span.findMany({
+    where: {
+      sessionId: parentSessionId,
+      kind: { in: ["tool_call", "command"] },
+      startTime: { gt: 0 },
+    },
+    select: { id: true, startTime: true, duration: true },
+    orderBy: [{ startTime: "desc" }, { duration: "desc" }],
+  });
+  const hit = candidates.find(
+    (sp) =>
+      sp.duration > 0 &&
+      sp.startTime <= childStartSec &&
+      childStartSec <= sp.startTime + sp.duration / 1000,
+  );
+  return hit?.id ?? null;
 }
 
 /**

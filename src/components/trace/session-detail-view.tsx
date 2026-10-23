@@ -1,12 +1,14 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { ArrowLeft, RefreshCw, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowLeft, RefreshCw, ChevronDown, ChevronRight, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { TraceTimeline } from "./trace-timeline";
 import { TraceTranscript } from "./trace-transcript";
 import { OutcomeBadge } from "./shared";
+import { SlidePanel } from "./slide-panel";
+import { SessionTreePanel } from "./session-tree-panel";
 import {
   buildCalls,
   compressIdleGaps,
@@ -51,6 +53,8 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
   );
   const [view, setView] = useState<"timeline" | "transcript">("timeline");
   const [reloadToken, setReloadToken] = useState(0);
+  // 会话父子链面板（SlidePanel）
+  const [treeOpen, setTreeOpen] = useState(false);
   /** 深链要定位的 span：与 selectedSpanId 分开，避免用户点树时甘特反复重新聚焦 */
   const [focusSpanId, setFocusSpanId] = useState<string | null>(null);
   // ?spanId= 只应用一次：之后用户手动点的选中项不能被刷新/重算覆盖
@@ -278,6 +282,19 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
             />
             {/* 终态与「过程失败」分开看：过程有失败不代表会话失败 */}
             <OutcomeBadge outcome={detail.outcome ?? ""} status={detail.status} />
+            {(detail.parentSessionId || detail.parentSpanId || detail.childCount > 0) && (
+              <button
+                onClick={() => setTreeOpen(true)}
+                title={
+                  detail.parentSpanId
+                    ? "点击查看会话父子链（本会话由父会话的工具调用派生）"
+                    : "点击查看会话父子链"
+                }
+                className="cursor-pointer rounded-sm bg-info/10 px-1.5 py-0.5 text-[10px] font-medium text-info ring-1 ring-info/30"
+              >
+                {detail.childCount > 0 ? `子会话 ${detail.childCount}` : "父链"}
+              </button>
+            )}
             <StatChip
               label="Tool"
               value={
@@ -429,6 +446,25 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
           </div>
         </aside>
       </div>
+
+      {/* 会话父子链面板 */}
+      <SlidePanel
+        open={treeOpen}
+        onClose={() => setTreeOpen(false)}
+        width={55}
+        minWidth="480px"
+        maxWidth="760px"
+      >
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h2 className="text-sm font-semibold">会话父子链</h2>
+          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setTreeOpen(false)}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <div className="flex-1 overflow-y-auto scrollbar-thin p-4">
+          <SessionTreePanel sessionId={detail.id} />
+        </div>
+      </SlidePanel>
     </div>
   );
 }

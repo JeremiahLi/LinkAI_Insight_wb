@@ -59,6 +59,16 @@ export async function GET() {
     modelsBySession.set(g.sessionId, set);
   }
 
+  // 父子链：直接子会话计数（一次 groupBy 拿全量，列表行 ↳N chip 用）
+  const childCountGroups = await prisma.session.groupBy({
+    by: ["parentSessionId"],
+    _count: { _all: true },
+    where: { parentSessionId: { not: null } },
+  });
+  const childCountByParent = new Map<string, number>(
+    childCountGroups.map((g) => [g.parentSessionId as string, g._count._all]),
+  );
+
   const result = sessions.map((s) => ({
     id: s.id,
     projectId: s.projectId,
@@ -90,6 +100,8 @@ export async function GET() {
     billableTokens: s.totalInputTokens + s.totalOutputTokens,
     totalDuration: s.totalDuration,
     forkCount: s.forkCount,
+    parentSessionId: s.parentSessionId,
+    childCount: childCountByParent.get(s.id) ?? 0,
   }));
 
   return NextResponse.json(result);

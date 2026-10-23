@@ -84,6 +84,9 @@ model Session {
   /// 父会话 id：跨进程父子链（采集端经环境变量链上报，PI_PARENT_SESSION_ID > PI_SESSION_ID 兜底）。
   /// 无外键约束——子会话可能先于父会话入库；null 表示无父/未知（含全部历史数据，不做回填）。
   parentSessionId  String?
+  /// 生成本会话的父会话工具调用 span id：时间窗覆盖本会话 startTime 的 kind ∈ ('tool_call','command') Span。
+  /// 无外键；由 upload route 服务端时间窗匹配填充（fill-if-empty），不回填历史。
+  parentSpanId     String?
   rawData          String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt

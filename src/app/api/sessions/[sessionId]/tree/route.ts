@@ -24,6 +24,7 @@ interface SessionTreeNode {
   model: string;
   totalTokens: number;
   parentSessionId: string | null;
+  parentSpanId: string | null;
   depth: number;
   children: SessionTreeNode[];
 }
@@ -89,6 +90,7 @@ export async function GET(
           model: true,
           totalTokens: true,
           parentSessionId: true,
+          parentSpanId: true,
           agent: { select: { name: true } },
         },
       })
@@ -109,6 +111,7 @@ export async function GET(
     model: s.model,
     totalTokens: s.totalTokens,
     parentSessionId: s.parentSessionId,
+    parentSpanId: s.parentSpanId,
     depth,
     children: [],
   });
@@ -155,9 +158,20 @@ export async function GET(
       model: true,
       totalTokens: true,
       parentSessionId: true,
+      parentSpanId: true,
       agent: { select: { name: true } },
     },
   });
+
+  // parentSpanName 仅 self 节点解析：该 span 属于父会话，子会话详情数据里没有
+  let parentSpanName: string | null = null;
+  if (self?.parentSpanId) {
+    const parentSpan = await prisma.span.findUnique({
+      where: { id: self.parentSpanId },
+      select: { name: true, kind: true },
+    });
+    parentSpanName = parentSpan ? `${parentSpan.name} (${parentSpan.kind})` : null;
+  }
 
   return NextResponse.json({
     session: self
@@ -172,6 +186,8 @@ export async function GET(
           model: self.model,
           totalTokens: self.totalTokens,
           parentSessionId: self.parentSessionId,
+          parentSpanId: self.parentSpanId,
+          parentSpanName,
           depth: 0,
           childCount: descendantRows.filter((r) => Number(r.depth) === 1).length,
           children: [],

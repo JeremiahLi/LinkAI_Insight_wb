@@ -79,6 +79,10 @@ interface SessionItem {
   billableTokens: number;
   totalDuration: number;
   forkCount: number;
+  /** 父会话 id（跨进程父子链）；null = 无父/未知 */
+  parentSessionId: string | null;
+  /** 直接子会话数 */
+  childCount: number;
 }
 
 /** 表格偏离列：mini bar 表达最大倍数，文字表达超线项数，两者缺一不可 */
@@ -1011,7 +1015,22 @@ export default function SessionBoardPage() {
                     <DeviationCell d={board?.rowDeviation[session.id]} />
                   </TableCell>
                   <TableCell className="text-center">
-                    <OutcomeBadge outcome={session.outcome} status={session.status} />
+                    <div className="flex items-center justify-center gap-1">
+                      <OutcomeBadge outcome={session.outcome} status={session.status} />
+                      {(session.childCount > 0 || session.parentSessionId) && (
+                        <span
+                          className="font-mono text-[10px] text-muted-foreground"
+                          title={
+                            session.childCount > 0
+                              ? `有 ${session.childCount} 个子会话`
+                              : "由父会话派生"
+                          }
+                        >
+                          {session.childCount > 0 && `↳${session.childCount}`}
+                          {session.parentSessionId && "↱"}
+                        </span>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell className="text-right text-xs text-muted-foreground">
                     {formatRelativeTime(new Date(session.startTime).getTime())}
