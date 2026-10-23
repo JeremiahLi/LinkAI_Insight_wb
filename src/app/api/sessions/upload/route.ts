@@ -15,6 +15,8 @@ export async function POST(request: Request) {
     agentName?: string;
     /** 采集端上报的可读项目名；缺省时从 span 内容反推工作目录名 */
     projectName?: string;
+    /** 父会话 id：跨进程父子链（采集端经环境变量链上报）；缺省/自环时为 null */
+    parentSessionId?: string | null;
     startedAt?: string;
     endedAt?: string;
     model?: string;
@@ -42,6 +44,7 @@ export async function POST(request: Request) {
       agent_name?: string;
       agent_id?: string;
       agent_version?: string;
+      parentSessionId?: string | null;
       createdAt?: string;
     }>;
   };
@@ -65,6 +68,18 @@ export async function POST(request: Request) {
   }
 
   const inSpans = body.spans || [];
+
+  // 父子链解析：顶层字段优先，回落取 span 里的首个非空值（兼容未来逐条上报）。
+  // 自环守卫：父 id 等于自身会话 id 视为无效（嵌套 pi resume 父会话等异常）。
+  const rawParentSessionId =
+    (typeof body.parentSessionId === "string" && body.parentSessionId.trim()) ||
+    inSpans.find((s) => typeof s.parentSessionId === "string" && s.parentSessionId.trim())
+      ?.parentSessionId ||
+    null;
+  const parentSessionId =
+    rawParentSessionId && rawParentSessionId.trim() && rawParentSessionId.trim() !== sessionID
+      ? rawParentSessionId.trim()
+      : null;
 
 // 数值字段收敛：旧版采集端（2026-07 前）会把 turnId 写成字符串（如 "loop-xxx#0"），
 // 其他数值字段也可能因历史格式异常传入非数字。Prisma Int 列校验严格，
@@ -139,17 +154,19 @@ function toIntOr(v: unknown, fallback: number): number {
     });
 
     // 1. 先确保 session 存在（用最小的数据 insert，不覆盖统计字段）
+    // parentSessionId：有值才覆盖，缺省不清空——旧格式 payload 不能抹掉已有链接
     const startFallback = resolvedStartMs != null ? { startTime: new Date(resolvedStartMs) } : {};
     await prisma.session.upsert({
       where: { id: sessionID },
       // startTime 修正：若 payload 带了 startedAt，或此前误用入库时间落库，则用正确基准刷新
-      update: startFallback,
+      update: { ...startFallback, ...(parentSessionId ? { parentSessionId } : {}) },
       create: {
         id: sessionID,
         projectId: projectIdDb,
         userId: userIdDb,
         agentId: agent.id,
         status: "active",
+        ...(parentSessionId ? { parentSessionId } : {}),
         // 首次就能推出可读名时直接写入，避免历史脏归属
         title: deriveTitle(inSpans),
         startTime: new Date(resolvedStartMs ?? Date.now()),
@@ -300,6 +317,7 @@ function toIntOr(v: unknown, fallback: number): number {
         ...(titleFromDb ? { title: titleFromDb } : {}),
         ...(outcome ? { outcome } : {}),
         ...(shouldReassignAgent ? { agentId: agent.id } : {}),
+        ...(parentSessionId ? { parentSessionId } : {}),
         model: model || "",
         endTime: endedAt ? new Date(endedAt) : new Date(),
         totalRounds: Math.max(roundIndices.size, existingSession?.totalRounds ?? 0),

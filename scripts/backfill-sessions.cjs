@@ -11,6 +11,9 @@
  *   - 标题：首条 user span 的 input 截断 60 字；
  *   - 终态：末条 answer 成功且有输出 → success（无 failed） / partial（有 failed），否则 failed。
  *
+ * 父子链（Session.parentSessionId，2026-10 起）不做回填：历史采集记录与库内均无
+ * 链接信息，时间窗 + cwd 启发式误判率不可接受（宁缺毋假），历史行保持 null。
+ *
  * 用法：
  *   node scripts/backfill-sessions.cjs            # dry-run，只打印将要做的改动
  *   node scripts/backfill-sessions.cjs --apply    # 真正写库

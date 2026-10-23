@@ -81,6 +81,9 @@ model Session {
   totalTokens      Int      @default(0)
   totalDuration    Int      @default(0)
   forkCount        Int      @default(0)
+  /// 父会话 id：跨进程父子链（采集端经环境变量链上报，PI_PARENT_SESSION_ID > PI_SESSION_ID 兜底）。
+  /// 无外键约束——子会话可能先于父会话入库；null 表示无父/未知（含全部历史数据，不做回填）。
+  parentSessionId  String?
   rawData          String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -94,6 +97,7 @@ model Session {
   @@index([agentId, startTime])
   @@index([projectId, startTime])
   @@index([startTime])
+  @@index([parentSessionId])
 }
 
 model Skill {
