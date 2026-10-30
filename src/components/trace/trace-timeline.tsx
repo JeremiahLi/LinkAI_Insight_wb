@@ -78,17 +78,17 @@ export function TraceTimeline({
     });
   }, [revealSpanId, spans, groups, totalSeconds]);
 
-  // 滚轮缩放：只有光标在甘特图内才缩放（其余区域交给浏览器原生上下滚动）。
-  // 图表区保留 Alt+滚轮缩放，避免普通滚轮被吃掉。
+  // 滚轮缩放：甘特图内 → 缩放甘特时间轴；下方两张柱状图内 → 缩放图表域（两图共用）；
+  // 其余位置（中间列空白处等）→ 不拦截，交给浏览器原生上下滚动。
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const handler = (e: WheelEvent) => {
       const target = e.target as HTMLElement | null;
       const scope = target?.closest?.("[data-zoom-scope]")?.getAttribute("data-zoom-scope");
-      const wantCharts = scope === "charts" && (e.altKey || e.ctrlKey || e.metaKey);
-      if (scope !== "gantt" && !wantCharts) return; // 原生滚动，不拦截
+      if (scope !== "gantt" && scope !== "charts") return; // 原生滚动，不拦截
       e.preventDefault();
+      const wantCharts = scope === "charts";
       const d = wantCharts ? (chartDomain ?? { start: 0, end: totalSeconds }) : ganttDomainRef.current;
       const span0 = Math.max(d.end - d.start, 0.001);
       const factor = Math.exp(e.deltaY * 0.0012); // 向下滚 = 缩小（zoom out）
@@ -160,7 +160,7 @@ export function TraceTimeline({
       ref={scrollRef}
       onDoubleClick={handleDoubleClick}
       className="flex-1 overflow-auto scrollbar-thin"
-      title="甘特图内滚轮缩放（其余区域滚轮=上下滚动；图表区 Alt+滚轮缩放）· 双击复位 · 双击 Round 聚焦 · 点击柱体查看构成 · 选中块后 ←/→ 逐块跳转"
+      title="甘特图内滚轮缩放时间轴 · 柱状图内滚轮缩放图表 · 空白处滚轮上下滚动 · 双击复位 · 点击柱体查看构成 · 选中块后 ←/→ 逐块跳转"
     >
       <div className="relative min-w-[860px] p-4 pb-3 pr-10">
         {/* 时间轴（甘特图专用缩放域） */}
