@@ -53,8 +53,6 @@ export function TraceTimeline({
   const gEff = ganttDomain ?? { start: 0, end: totalSeconds };
   const ganttDomainRef = useRef(gEff);
   ganttDomainRef.current = gEff;
-  const chartDomainRef = useRef(gEff);
-  chartDomainRef.current = chartDomain ?? { start: 0, end: totalSeconds };
   const axisTrackRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -80,22 +78,18 @@ export function TraceTimeline({
     });
   }, [revealSpanId, spans, groups, totalSeconds]);
 
-  // 滚轮缩放：以鼠标位置为锚点；按光标所在区域（data-zoom-scope）作用于甘特图或图表
+  // 滚轮缩放：只有光标在甘特图内才缩放（其余区域交给浏览器原生上下滚动）。
+  // 图表区保留 Alt+滚轮缩放，避免普通滚轮被吃掉。
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const handler = (e: WheelEvent) => {
-      // Shift + 滚轮：上下滚动（缩放占用普通滚轮后的滚动后备）
-      if (e.shiftKey) {
-        e.preventDefault();
-        el.scrollTop += e.deltaY;
-        return;
-      }
-      e.preventDefault();
       const target = e.target as HTMLElement | null;
-      const scopeEl = target?.closest?.("[data-zoom-scope]");
-      const scope = scopeEl?.getAttribute("data-zoom-scope") ?? "gantt";
-      const d = scope === "charts" ? chartDomainRef.current : ganttDomainRef.current;
+      const scope = target?.closest?.("[data-zoom-scope]")?.getAttribute("data-zoom-scope");
+      const wantCharts = scope === "charts" && (e.altKey || e.ctrlKey || e.metaKey);
+      if (scope !== "gantt" && !wantCharts) return; // 原生滚动，不拦截
+      e.preventDefault();
+      const d = wantCharts ? (chartDomain ?? { start: 0, end: totalSeconds }) : ganttDomainRef.current;
       const span0 = Math.max(d.end - d.start, 0.001);
       const factor = Math.exp(e.deltaY * 0.0012); // 向下滚 = 缩小（zoom out）
       const minSpan = Math.max(totalSeconds / 2000, 0.05);
@@ -119,12 +113,12 @@ export function TraceTimeline({
         ns = Math.max(ns - shift, 0);
         ne = totalSeconds;
       }
-      if (scope === "charts") setChartDomain({ start: ns, end: ne });
+      if (wantCharts) setChartDomain({ start: ns, end: ne });
       else setGanttDomain({ start: ns, end: ne });
     };
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
-  }, [totalSeconds]);
+  }, [totalSeconds, chartDomain]);
 
   const spanSec = gEff.end - gEff.start;
   const px = useCallback(
@@ -166,7 +160,7 @@ export function TraceTimeline({
       ref={scrollRef}
       onDoubleClick={handleDoubleClick}
       className="flex-1 overflow-auto scrollbar-thin"
-      title="滚轮缩放（甘特图/图表独立）· 双击复位对应区域 · 双击 Round 聚焦甘特图 · 点击柱体查看构成"
+      title="甘特图内滚轮缩放（其余区域滚轮=上下滚动；图表区 Alt+滚轮缩放）· 双击复位 · 双击 Round 聚焦 · 点击柱体查看构成 · 选中块后 ←/→ 逐块跳转"
     >
       <div className="relative min-w-[860px] p-4 pb-3 pr-10">
         {/* 时间轴（甘特图专用缩放域） */}
@@ -536,7 +530,7 @@ function TokenCharts({
     drawGrid(ctx, w, h, maxPrompt, 3, top, bottom);
     if (slots.length > 0) drawRoundBands(ctx, (w - 8) / slots.length, top, bottom);
 
-    // 堆叠：新增贴基线（同一基线便于横向比新增量），复用叠在上方
+    // 堆叠：缓存读（复用）贴基线，新增叠在最上方
     const freshColor = cssVar("--chart-new", "#f0883e");
     const reuseColor = cssVar("--chart-bar-in", "rgba(88,166,255,0.8)");
     for (const s of slots) {
@@ -546,11 +540,12 @@ function TokenCharts({
       const x = s.cx - barW / 2 + 4;
       if (reuseH > 0) {
         ctx.fillStyle = reuseColor;
-        ctx.fillRect(x, baseY - totalH, barW, reuseH);
+        ctx.fillRect(x, baseY - reuseH, barW, reuseH);
       }
       if (freshH > 0) {
+        const hFresh = Math.max(freshH, 1);
         ctx.fillStyle = freshColor;
-        ctx.fillRect(x, baseY - freshH, barW, Math.max(freshH, 1));
+        ctx.fillRect(x, baseY - reuseH - hFresh, barW, hFresh);
       }
       // 同步高亮：当前选中的调用柱描边标记
       if (highlightCallId && s.call.id === highlightCallId) {
@@ -690,8 +685,8 @@ function TokenCharts({
             )}
           </div>
           <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-0.5 pr-2 text-[10px] text-muted-foreground">
-            {legendSwatch("--chart-new", "新增（未命中缓存）", "本次调用新拼入上下文、没能命中提示缓存的部分 = input + 缓存写。真实值")}
             {legendSwatch("--chart-bar-in", "复用（缓存读）", "命中提示缓存的已有前缀：系统提示、工具定义、历史轮次、旧工具结果，直接复用无需重算。真实值")}
+            {legendSwatch("--chart-new", "新增（未命中缓存）", "本次调用新拼入上下文、没能命中提示缓存的部分 = input + 缓存写。真实值")}
             <span className="hidden sm:inline">点击柱体看明细</span>
           </div>
         </div>

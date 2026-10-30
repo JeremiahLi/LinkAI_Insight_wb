@@ -120,6 +120,49 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
     return null;
   }, [selectedCall, selectedSpan, calls]);
 
+  /**
+   * ←/→ 逐块跳转的次序：按时间线起点排序。
+   * 并行块起点相同时按结束时刻、再按名称兜底，保证顺序稳定可复现。
+   * 效果：选中某个 LLM 块 → → 落到它之后执行的 Tool 块 → 再 → 落到并行调用的另一个 Tool。
+   */
+  const navOrder = useMemo(
+    () =>
+      [...spans].sort(
+        (a, b) =>
+          a.relStart - b.relStart ||
+          a.relStart + a.timelineMs / 1000 - (b.relStart + b.timelineMs / 1000) ||
+          a.name.localeCompare(b.name),
+      ),
+    [spans],
+  );
+
+  // 键盘逐块跳转：只在已有选中块时接管方向键，避免抢走页面其它地方的左右键
+  useEffect(() => {
+    if (!selectedSpanId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const i = navOrder.findIndex((s) => s.id === selectedSpanId);
+      if (i < 0) return;
+      const next =
+        e.key === "ArrowRight" ? Math.min(i + 1, navOrder.length - 1) : Math.max(i - 1, 0);
+      if (next === i) return;
+      e.preventDefault();
+      const id = navOrder[next].id;
+      setSelectedSpanId(id);
+      setSelectedCall(null);
+      // 跳到视口外的块时，把左树的对应条目带到可见位置
+      requestAnimationFrame(() => {
+        document
+          .querySelector(`[data-span-id="${CSS.escape(id)}"]`)
+          ?.scrollIntoView({ block: "nearest" });
+      });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedSpanId, navOrder]);
+
   const llmCount = useMemo(() => spans.filter((s) => s.kind === "llm_thinking").length, [spans]);
   const toolCount = useMemo(
     () => spans.filter((s) => s.kind === "tool_call" || s.kind === "command").length,
