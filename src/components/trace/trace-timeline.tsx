@@ -20,7 +20,7 @@ interface Props {
   totalSeconds: number;
   selectedId: string | null;
   onSelect: (id: string) => void;
-  onSelectCall?: (callId: string, view: "cum" | "delta") => void;
+  onSelectCall?: (callId: string, view: "prompt" | "new") => void;
   /** 当前高亮的 LLM 调用（call.id = llm_thinking span.id）：左树/甘特/两图同步标记 */
   highlightCallId?: string | null;
   /**
@@ -358,8 +358,6 @@ function fmtTokShort(n: number): string {
 interface Slot {
   call: CallInfo;
   cx: number; // 槽位中心 px
-  cumBefore: number;
-  cumAfter: number;
 }
 
 function TokenCharts({
@@ -376,7 +374,7 @@ function TokenCharts({
   zoomed: boolean;
   totalSeconds: number;
   onDomainChange: (d: Domain) => void;
-  onSelectCall?: (callId: string, view: "cum" | "delta") => void;
+  onSelectCall?: (callId: string, view: "prompt" | "new") => void;
   highlightCallId?: string | null;
 }) {
   const lineRef = useRef<HTMLCanvasElement>(null);
@@ -385,29 +383,17 @@ function TokenCharts({
 
   const calls = useMemo(() => buildCalls(spans), [spans]);
 
-  // 全局累计（跨所有调用，不随缩放变化）
-  const cumAfter = useMemo(() => {
-    let cum = 0;
-    return calls.map((c) => {
-      cum += c.total;
-      return cum;
-    });
-  }, [calls]);
-
   // 可视域内的调用（按调用起点落在域内判定）
   const visible = useMemo(
-    () =>
-      calls
-        .map((c, i) => ({ call: c, cumBefore: i > 0 ? cumAfter[i - 1] : 0, cumAfter: cumAfter[i] }))
-        .filter(({ call }) => call.time >= domain.start - 0.001 && call.time <= domain.end + 0.001),
-    [calls, cumAfter, domain],
+    () => calls.filter((c) => c.time >= domain.start - 0.001 && c.time <= domain.end + 0.001),
+    [calls, domain],
   );
 
   // Round 分区：可视域内连续同 Round 的调用槽位区间
   const roundRanges = useMemo(() => {
     const ranges: Array<{ roundIndex: number; start: number; end: number }> = [];
-    visible.forEach((v, i) => {
-      const ri = v.call.roundIndex;
+    visible.forEach((call, i) => {
+      const ri = call.roundIndex;
       const last = ranges[ranges.length - 1];
       if (last && last.roundIndex === ri) last.end = i;
       else ranges.push({ roundIndex: ri, start: i, end: i });
@@ -479,7 +465,7 @@ function TokenCharts({
     const n = visible.length;
     if (n === 0) return [];
     const slotW = w / n;
-    return visible.map((v, i) => ({ ...v, cx: slotW * (i + 0.5) }));
+    return visible.map((call, i) => ({ call, cx: slotW * (i + 0.5) }));
   };
 
   /** Round 分区背景：交替底色 + 分隔线 + 顶部 Round 标签（slotW 为槽位宽） */
@@ -522,7 +508,8 @@ function TokenCharts({
     ctx.textAlign = "left";
   };
 
-  const drawCum = useCallback(() => {
+  /** 图 1：上下文规模——每次调用的 prompt（堆叠：新增在下、复用在上） */
+  const drawPrompt = useCallback(() => {
     const canvas = lineRef.current;
     if (!canvas || !canvas.parentElement?.clientWidth) return;
     const setup = setupCanvas(canvas, 140);
@@ -534,8 +521,8 @@ function TokenCharts({
     const bottom = h - 8;
     const slots = slotLayout(w - 8);
     slotsRef.current = slots;
-    const maxCum = Math.max(...slots.map((s) => s.cumAfter), 1);
-    const scale = (v: number) => (v / maxCum) * (bottom - top);
+    const maxPrompt = Math.max(...slots.map((s) => s.call.prompt), 1);
+    const scale = (v: number) => (v / maxPrompt) * (bottom - top);
     const barW = slots.length > 0 ? Math.min(Math.max(((w - 8) / slots.length) * 0.55, 6), 30) : 0;
     const baseY = bottom;
     const showNums = barW >= 12; // 柱宽足够时才绘制数字，避免全览时密集噪点
@@ -546,23 +533,24 @@ function TokenCharts({
     ctx.rect(0, 0, w, h);
     ctx.clip();
 
-    drawGrid(ctx, w, h, maxCum, 3, top, bottom);
+    drawGrid(ctx, w, h, maxPrompt, 3, top, bottom);
     if (slots.length > 0) drawRoundBands(ctx, (w - 8) / slots.length, top, bottom);
 
-    // 等宽堆叠柱：蓝 = 该次调用之前的累计，橙 = 本次新增
-    const blueColor = cssVar("--chart-bar-in", "rgba(88,166,255,0.8)");
-    const orangeColor = cssVar("--chart-new", "#f0883e");
+    // 堆叠：新增贴基线（同一基线便于横向比新增量），复用叠在上方
+    const freshColor = cssVar("--chart-new", "#f0883e");
+    const reuseColor = cssVar("--chart-bar-in", "rgba(88,166,255,0.8)");
     for (const s of slots) {
-      const totalH = scale(s.cumAfter);
-      const blueH = scale(s.cumBefore);
+      const freshH = scale(s.call.fresh);
+      const reuseH = scale(s.call.reuse);
+      const totalH = freshH + reuseH;
       const x = s.cx - barW / 2 + 4;
-      if (totalH - blueH > 0) {
-        ctx.fillStyle = orangeColor;
-        ctx.fillRect(x, baseY - totalH, barW, totalH - blueH);
+      if (reuseH > 0) {
+        ctx.fillStyle = reuseColor;
+        ctx.fillRect(x, baseY - totalH, barW, reuseH);
       }
-      if (blueH > 0) {
-        ctx.fillStyle = blueColor;
-        ctx.fillRect(x, baseY - blueH, barW, blueH);
+      if (freshH > 0) {
+        ctx.fillStyle = freshColor;
+        ctx.fillRect(x, baseY - freshH, barW, Math.max(freshH, 1));
       }
       // 同步高亮：当前选中的调用柱描边标记
       if (highlightCallId && s.call.id === highlightCallId) {
@@ -570,36 +558,18 @@ function TokenCharts({
         ctx.lineWidth = 1.5;
         ctx.strokeRect(x - 1.5, baseY - totalH - 2, barW + 3, totalH + 4);
       }
-      // 蓝色数字：原有累计（画在蓝色段内部）；橙色数字：本次新增（柱顶上方）
+      // 柱顶标注上下文规模
       if (!showNums) continue;
       ctx.font = "9px ui-monospace, monospace";
       ctx.textAlign = "center";
-      if (blueH > 13) {
-        ctx.fillStyle = cssVar("--background", "#0d1117");
-        ctx.fillText(fmtTokShort(s.cumBefore), s.cx + 4, baseY - blueH + 11);
-      }
-      if (totalH - blueH > 0) {
-        ctx.fillStyle = orangeColor;
-        ctx.fillText(`+${fmtTokShort(s.cumAfter - s.cumBefore)}`, s.cx + 4, baseY - totalH - 4);
-      }
-    }
-
-    // 累计折线（贯穿柱顶）
-    if (slots.length > 0) {
-      ctx.beginPath();
-      slots.forEach((s, i) => {
-        const y = baseY - scale(s.cumAfter);
-        if (i === 0) ctx.moveTo(s.cx + 4, y);
-        else ctx.lineTo(s.cx + 4, y);
-      });
-      ctx.strokeStyle = cssVar("--chart-line", "#58a6ff");
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+      ctx.fillStyle = cssVar("--foreground", "#e6edf3");
+      ctx.fillText(fmtTokShort(s.call.prompt), s.cx + 4, Math.max(baseY - totalH - 4, 11));
     }
     ctx.restore();
   }, [visible, roundRanges, highlightCallId]);
 
-  const drawDelta = useCallback(() => {
+  /** 图 2：新增输入构成——柱高为真实新增（未命中缓存），分段为按字符占比分摊的估算 */
+  const drawFresh = useCallback(() => {
     const canvas = barRef.current;
     if (!canvas || !canvas.parentElement?.clientWidth) return;
     const setup = setupCanvas(canvas, 120);
@@ -610,8 +580,8 @@ function TokenCharts({
     const top = 18;
     const bottom = h - 8;
     const slots = slotLayout(w - 8);
-    const maxTotal = Math.max(...slots.map((s) => s.call.total), 1);
-    const scale = (v: number) => (v / maxTotal) * (bottom - top);
+    const maxFresh = Math.max(...slots.map((s) => s.call.fresh), 1);
+    const scale = (v: number) => (v / maxFresh) * (bottom - top);
     const barW = slots.length > 0 ? Math.min(Math.max(((w - 8) / slots.length) * 0.55, 6), 30) : 0;
     const baseY = bottom;
 
@@ -621,10 +591,10 @@ function TokenCharts({
     ctx.rect(0, 0, w, h);
     ctx.clip();
 
-    drawGrid(ctx, w, h, maxTotal, 3, top, bottom);
+    drawGrid(ctx, w, h, maxFresh, 3, top, bottom);
     if (slots.length > 0) drawRoundBands(ctx, (w - 8) / slots.length, top, bottom);
 
-    // 每次调用新增构成：自下而上堆叠（高对比配色）
+    // 新增来源构成：自下而上堆叠（part.value 之和恰等于 call.fresh）
     for (const s of slots) {
       let yCursor = baseY;
       const x = s.cx - barW / 2 + 4;
@@ -641,21 +611,21 @@ function TokenCharts({
         ctx.lineWidth = 1.5;
         ctx.strokeRect(x - 1.5, yCursor - 2, barW + 3, baseY - yCursor + 4);
       }
-      // 总数标注在柱顶上方（柱宽足够时才绘制，避免全览时密集噪点）
+      // 新增总量标注在柱顶上方（柱宽足够时才绘制，避免全览时密集噪点）
       if (baseY - yCursor > 0 && barW >= 12) {
         ctx.fillStyle = cssVar("--foreground", "#e6edf3");
         ctx.font = "9px ui-monospace, monospace";
         ctx.textAlign = "center";
-        ctx.fillText(fmtTokShort(s.call.total), s.cx + 4, Math.max(yCursor - 4, 12));
+        ctx.fillText(fmtTokShort(s.call.fresh), s.cx + 4, Math.max(yCursor - 4, 12));
       }
     }
     ctx.restore();
   }, [visible, roundRanges, highlightCallId]);
 
   const drawAll = useCallback(() => {
-    drawCum();
-    drawDelta();
-  }, [drawCum, drawDelta]);
+    drawPrompt();
+    drawFresh();
+  }, [drawPrompt, drawFresh]);
 
   useEffect(() => {
     drawAll();
@@ -685,14 +655,14 @@ function TokenCharts({
     return i >= 0 && i < n ? i : -1;
   };
 
-  const handleCumClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handlePromptClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const i = slotIndexFromEvent(e);
-    if (i >= 0) onSelectCall?.(slotsRef.current[i].call.id, "cum");
+    if (i >= 0) onSelectCall?.(slotsRef.current[i].call.id, "prompt");
   };
 
-  const handleDeltaClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleFreshClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const i = slotIndexFromEvent(e);
-    if (i >= 0) onSelectCall?.(slotsRef.current[i].call.id, "delta");
+    if (i >= 0) onSelectCall?.(slotsRef.current[i].call.id, "new");
   };
 
   const legendSwatch = (colorVar: string, label: string, title?: string) => (
@@ -707,60 +677,64 @@ function TokenCharts({
 
   return (
     <>
-      {/* 累计 Token：折线 + 等宽堆叠柱（蓝 = 原有累计 / 橙 = 本次新增），柱区全宽 */}
+      {/* 图 1：上下文规模（每次调用的 prompt 总量），柱区全宽 */}
       <div className="mt-4 border-t border-border pt-3">
-        <div className="relative flex items-center justify-end">
-          <div className="absolute left-1 flex flex-col">
-            <span className="text-xs font-medium text-muted-foreground">累计 Token</span>
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex shrink-0 flex-col pl-1">
+            <span className="text-xs font-medium text-muted-foreground">上下文规模 · 每次调用</span>
+            <span className="text-[10px] text-muted-foreground/60">
+              柱高 = input + 缓存读写
+            </span>
             {zoomed && (
               <span className="text-[9px] text-[var(--trace-llm)]">已缩放 · 双击复位</span>
             )}
           </div>
-          <div className="flex items-center gap-3 pr-2 text-[10px] text-muted-foreground">
-            {legendSwatch("--chart-bar-in", "原有累计")}
-            {legendSwatch("--chart-new", "本次新增")}
-            <span className="hidden sm:inline">点击柱体查看构成 · 折线为累计走势</span>
+          <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-0.5 pr-2 text-[10px] text-muted-foreground">
+            {legendSwatch("--chart-new", "新增（未命中缓存）", "本次调用新拼入上下文、没能命中提示缓存的部分 = input + 缓存写。真实值")}
+            {legendSwatch("--chart-bar-in", "复用（缓存读）", "命中提示缓存的已有前缀：系统提示、工具定义、历史轮次、旧工具结果，直接复用无需重算。真实值")}
+            <span className="hidden sm:inline">点击柱体看明细</span>
           </div>
         </div>
         <div className="relative" data-zoom-track="1">
           <canvas
             ref={lineRef}
             className="block cursor-pointer"
-            onClick={handleCumClick}
+            onClick={handlePromptClick}
           />
         </div>
-        {/* 折线图底部进度条 */}
+        {/* 柱状图底部进度条 */}
         <div className="mt-1.5">
           <DomainScrollbar domain={domain} total={totalSeconds} onChange={onDomainChange} />
         </div>
       </div>
 
-      {/* 每次调用 Token 增量：构成堆叠柱（等宽），柱区全宽 */}
+      {/* 图 2：新增输入构成（柱高真实，分段按字符占比分摊估算），柱区全宽 */}
       <div className="mt-3 border-t border-border pb-1 pt-3">
-        <div className="relative flex items-center justify-end">
-          <div className="absolute left-1 flex flex-col">
-            <span className="text-xs font-medium text-muted-foreground">每次调用增量</span>
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex shrink-0 flex-col pl-1">
+            <span className="text-xs font-medium text-muted-foreground">新增输入构成</span>
+            <span className="text-[10px] text-muted-foreground/60">
+              柱高真实 · 分段按字符占比分摊
+            </span>
             {zoomed && (
               <span className="text-[9px] text-[var(--trace-llm)]">已缩放 · 双击复位</span>
             )}
           </div>
           <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-0.5 pr-2 text-[10px] text-muted-foreground">
-            {legendSwatch("--call-assistant", "assistant", "上一轮模型输出（含 tool_calls）作为本轮输入被重新消费")}
-            {legendSwatch("--call-tool", "tool 结果", "两次调用之间各工具的执行结果（按字符估算）")}
-            {legendSwatch("--call-user", "用户输入", "本轮用户提问（估算）")}
-            {legendSwatch("--call-sys", "系统提示", "本轮注入的 System Prompt（估算）")}
-            {legendSwatch("--call-tooldefs", "工具定义", "请求携带的工具/Schema 定义（按采集字符数估算；未采集到时并入其他）")}
-            {legendSwatch("--call-cache", "缓存读（命中）", "命中提示缓存的输入 Token：与之前重复的前缀直接复用、无需重新计算；是每次调用的大头。真实值")}
-            {legendSwatch("--call-cachewrite", "缓存写（新建）", "新写入提示缓存的输入 Token：新拼入上下文的内容，供后续调用命中。真实值")}
-            {legendSwatch("--call-other", "其他", "无法归类到上述成分的剩余输入（残差兜底）")}
-            {legendSwatch("--call-output", "本次输出", "本次调用模型生成的输出（含 tool_calls）。真实值")}
+            {legendSwatch("--call-assistant", "上轮输出", "上一轮模型输出（含 tool_calls）作为本轮输入重新送入")}
+            {legendSwatch("--call-fileread", "文件读取", "read 类工具返回的文件内容（按字符数估算）")}
+            {legendSwatch("--call-tool", "工具结果", "bash / grep / 写文件等其余工具的执行结果（按字符数估算）")}
+            {legendSwatch("--call-user", "用户输入", "本轮用户提问（按字符数估算）")}
+            {legendSwatch("--call-sys", "系统提示", "本轮注入的 System Prompt（按字符数估算）")}
+            {legendSwatch("--call-tooldefs", "工具定义", "请求携带的工具/Schema 定义（按采集字符数估算）")}
+            {legendSwatch("--call-other", "未归因", "新增里无法归到具体来源的部分：没命中缓存被重算的旧上下文，或采集端截断的系统提示/工具定义")}
           </div>
         </div>
         <div className="relative" data-zoom-track="1">
           <canvas
             ref={barRef}
             className="block cursor-pointer"
-            onClick={handleDeltaClick}
+            onClick={handleFreshClick}
           />
         </div>
         {/* 柱状图底部进度条 */}

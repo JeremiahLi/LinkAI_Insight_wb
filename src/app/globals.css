@@ -114,6 +114,7 @@
   /* LLM 调用构成分解（高对比） */
   --call-assistant: oklch(0.62 0.16 300);
   --call-tool: oklch(0.6 0.15 155);
+  --call-fileread: oklch(0.58 0.12 195);
   --call-user: oklch(0.65 0.1 220);
   --call-sys: oklch(0.72 0.15 70);
   --call-cache: oklch(0.6 0.14 230);
@@ -181,6 +182,7 @@
   /* LLM 调用构成分解（高对比） */
   --call-assistant: #a371f7;
   --call-tool: #3fb950;
+  --call-fileread: #39c5cf;
   --call-user: #56d4dd;
   --call-sys: #d29922;
   --call-cache: #58a6ff;

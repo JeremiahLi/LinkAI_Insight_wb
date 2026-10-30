@@ -368,15 +368,18 @@ export function compressIdleGaps(spans: TraceSpan[], gapSec: number = ROUND_GAP_
 // ==================== LLM 调用构成分解 ====================
 
 /**
- * 把每次 LLM 调用消耗的 Token（total）拆解为构成项：
- * - assistant：上一轮模型输出（含 tool_calls），作为本轮输入被重新消费
- * - tool：两次调用之间的工具执行结果（按字符数 ≈/4 估算，DB 无工具结果 token 数）
- * - user / system：Round 首次调用时的用户输入 / 系统提示（同上估算）
- * - cacheRead：缓存读——本调用命中提示缓存的输入 Token（前缀与之前一致，无需重新计算）
- * - cacheWrite：缓存写——本调用新写入提示缓存的输入 Token（通常是新拼入上下文的内容）
- *   （缓存读/写为 API 上报的真实值；total = input + output + cacheRead + cacheWrite）
- * - other：其他输入（残差，兜底）
- * - output：本次模型输出（真实值）
+ * 单次调用的 Token 口径（全部走 API 上报的三段，不再用 totalTokens）：
+ *
+ *   prompt（上下文规模）= input + cacheRead + cacheWrite
+ *   fresh（新增）      = input + cacheWrite   ← 未命中缓存的那部分
+ *   reuse（复用）      = cacheRead            ← 命中缓存的前缀，无需重新计算
+ *   output             = output               ← 模型输出，不计入输入
+ *
+ * 为什么不用 totalTokens：库里并存两套口径（旧/种子数据是 input+output，
+ * 上行链路是四段之和），前端按四段重算可以绕开这个不一致。
+ *
+ * fresh 的内部来源（上一轮输出 / 文件读取 / 工具结果 / 用户输入 / 系统提示 / 工具定义）
+ * API 不提供，只能按各来源字符数占比分摊——合计恰等于 fresh，属估算。
  */
 
 export interface CallPart {
@@ -395,7 +398,15 @@ export interface CallInfo {
   duration: number; // 秒
   order: number; // 全局序号（1-based）
   roundIndex: number;
-  total: number;
+  /** 上下文规模 = input + cacheRead + cacheWrite（真实值） */
+  prompt: number;
+  /** 新增 = input + cacheWrite（真实值） */
+  fresh: number;
+  /** 复用 = cacheRead（真实值） */
+  reuse: number;
+  /** 本次模型输出（真实值，不属于输入） */
+  output: number;
+  /** 新增部分的来源构成（估算，合计恰等于 fresh） */
   parts: CallPart[];
 }
 
@@ -420,6 +431,12 @@ const approxTokens = (text?: string | null): number => {
 
 const TOOL_KINDS = new Set(["tool_call", "tool_execution", "command"]);
 
+/**
+ * 视为「文件读取」的工具名（小写匹配）。
+ * 这个场景里 read 的结果常占新增输入的绝大部分，混在「工具结果」里看不出来。
+ */
+const READ_TOOLS = new Set(["read", "read_file", "readfile", "view_file", "cat"]);
+
 /** 是否为工具类 Span（用于树/甘特缩进归属到所属 LLM 调用） */
 export function isToolKind(kind: string): boolean {
   return TOOL_KINDS.has(kind);
@@ -435,19 +452,23 @@ export function buildCalls(spans: TraceSpan[]): CallInfo[] {
 
   for (const c of calls) {
     const t = c.tokens!;
+    const prompt = t.input + t.cacheRead + t.cacheWrite;
+    const fresh = Math.max(t.input + t.cacheWrite, 0);
+    const reuse = Math.max(t.cacheRead, 0);
     const output = t.output;
-    const cacheRead = t.cacheRead;
-    const cacheWrite = t.cacheWrite;
     const isFirstOfRound = !prev || prev.roundIndex !== c.roundIndex;
     const assistant = !isFirstOfRound ? prev?.tokens?.output ?? 0 : 0;
 
-    // 两次调用之间的工具结果
-    let toolEst = 0;
+    // 两次调用之间的工具结果：read 类工具（文件读取）单独归一类
+    let toolReadEst = 0;
+    let toolOtherEst = 0;
     const lo = prev ? prev.startTime : -Infinity;
     for (const s of spans) {
       if (!TOOL_KINDS.has(s.kind) || s.roundIndex !== c.roundIndex) continue;
       if (s.startTime > lo && s.startTime <= c.startTime) {
-        toolEst += approxTokens(s.output);
+        const est = approxTokens(s.output);
+        if (READ_TOOLS.has(s.name.toLowerCase())) toolReadEst += est;
+        else toolOtherEst += est;
       }
     }
 
@@ -479,85 +500,51 @@ export function buildCalls(spans: TraceSpan[]): CallInfo[] {
       }
     }
 
-    // 估算溢出时按比例压缩，保证分解总和 ≈ total
-    const fixed = output + cacheRead + cacheWrite + assistant;
-    let est = toolEst + userEst + sysEst + toolDefsEst;
-    const over = fixed + est - t.total;
-    if (over > 0 && est > 0) {
-      const k = Math.max(t.total - fixed, 0) / est;
-      toolEst = Math.round(toolEst * k);
-      userEst = Math.round(userEst * k);
-      sysEst = Math.round(sysEst * k);
-      toolDefsEst = Math.round(toolDefsEst * k);
-      est = toolEst + userEst + sysEst + toolDefsEst;
-    }
-    const other = Math.max(0, t.total - fixed - est);
-
-    const parts: CallPart[] = [
+    // 按各来源字符占比把 fresh 分摊下去：柱高是真实值，分段是估算，合计恰等于 fresh
+    const parts = allocateFresh(fresh, [
       {
         key: "assistant",
-        label: "assistant（上轮模型输出）",
-        desc: "上一轮模型的输出（含 tool_calls），作为本轮输入被重新送入模型",
+        label: "上轮模型输出",
+        desc: "上一轮模型的输出（含 tool_calls），作为本轮输入重新送入模型",
         colorVar: "--call-assistant",
-        value: assistant,
+        est: assistant,
+      },
+      {
+        key: "toolRead",
+        label: "文件读取",
+        desc: "read 类工具返回的文件内容（按字符数估算）",
+        colorVar: "--call-fileread",
+        est: toolReadEst,
       },
       {
         key: "tool",
-        label: "tool（工具执行结果）",
-        desc: "两次调用之间各工具的执行结果（按字符数 ≈4字符/token 估算）",
+        label: "工具结果（其他）",
+        desc: "bash / grep / 写文件等其余工具的执行结果（按字符数估算）",
         colorVar: "--call-tool",
-        value: toolEst,
+        est: toolOtherEst,
       },
       {
         key: "user",
         label: "用户输入",
         desc: "本轮用户提问（按字符数估算）",
         colorVar: "--call-user",
-        value: userEst,
+        est: userEst,
       },
       {
         key: "system",
         label: "系统提示",
-        desc: "本轮注入的 System Prompt（估算）",
+        desc: "本轮注入的 System Prompt（按字符数估算）",
         colorVar: "--call-sys",
-        value: sysEst,
+        est: sysEst,
       },
       {
         key: "toolDefs",
         label: "工具定义",
-        desc: "本次请求携带的工具/Schema 定义（按采集到的字符数估算；未采集到时并入其他输入）",
+        desc: "本次请求携带的工具/Schema 定义（按采集到的字符数估算）",
         colorVar: "--call-tooldefs",
-        value: toolDefsEst,
+        est: toolDefsEst,
       },
-      {
-        key: "cacheRead",
-        label: "缓存读（命中）",
-        desc: "本调用命中提示缓存的输入 Token：与之前重复的前缀（系统提示/历史轮次/旧工具结果）直接复用，无需重新计算。真实值",
-        colorVar: "--call-cache",
-        value: cacheRead,
-      },
-      {
-        key: "cacheWrite",
-        label: "缓存写（新建）",
-        desc: "本调用新写入提示缓存的输入 Token：通常是新拼入上下文的内容，供后续调用命中。真实值",
-        colorVar: "--call-cachewrite",
-        value: cacheWrite,
-      },
-      {
-        key: "other",
-        label: "其他输入",
-        desc: "无法归类到上述成分的剩余输入：典型为工具定义/Schema（每次请求携带但无单独记录）、图片/附件内容，以及字符估算与真实分词的偏差（残差兜底）",
-        colorVar: "--call-other",
-        value: other,
-      },
-      {
-        key: "output",
-        label: "本次模型输出",
-        desc: "本次调用模型生成的输出（含 tool_calls）。真实值",
-        colorVar: "--call-output",
-        value: output,
-      },
-    ].filter((p) => p.value > 0);
+    ]);
 
     result.push({
       id: c.id,
@@ -567,7 +554,10 @@ export function buildCalls(spans: TraceSpan[]): CallInfo[] {
       duration: c.timelineMs / 1000,
       order: result.length + 1,
       roundIndex: c.roundIndex,
-      total: t.total,
+      prompt,
+      fresh,
+      reuse,
+      output,
       parts,
     });
     prev = c;
@@ -575,24 +565,73 @@ export function buildCalls(spans: TraceSpan[]): CallInfo[] {
   return result;
 }
 
-/** 累计视角：聚合前 n 次调用的各构成项（求和恰好等于 Σ total） */
-export function cumulativeParts(calls: CallInfo[], upToOrder: number): { parts: CallPart[]; total: number } {
-  const scoped = calls.filter((c) => c.order <= upToOrder);
-  const sum = (key: string) =>
-    scoped.reduce((acc, c) => acc + (c.parts.find((p) => p.key === key)?.value ?? 0), 0);
-  const defs: Array<{ key: string; label: string; desc?: string; colorVar: string }> = [
-    { key: "output", label: "模型输出（assistant 消息）", desc: "各次调用模型生成的输出之和（真实值）", colorVar: "--call-output" },
-    { key: "assistant", label: "assistant（作为输入重读）", desc: "上一轮输出作为下一轮输入被重新消费的部分", colorVar: "--call-assistant" },
-    { key: "tool", label: "tool（工具执行结果）", desc: "工具执行结果按字符数 ≈4字符/token 估算", colorVar: "--call-tool" },
-    { key: "user", label: "用户输入", desc: "各轮用户提问（估算）", colorVar: "--call-user" },
-    { key: "system", label: "系统提示", desc: "各轮注入的 System Prompt（估算）", colorVar: "--call-sys" },
-    { key: "toolDefs", label: "工具定义", desc: "请求携带的工具/Schema 定义（按采集字符数估算）", colorVar: "--call-tooldefs" },
-    { key: "cacheRead", label: "缓存读（命中）", desc: "各调用命中提示缓存的输入 Token 之和（真实值）", colorVar: "--call-cache" },
-    { key: "cacheWrite", label: "缓存写（新建）", desc: "各调用新写入提示缓存的输入 Token 之和（真实值）", colorVar: "--call-cachewrite" },
-    { key: "other", label: "其他输入", desc: "工具定义/Schema、图片/附件、估算偏差等无法归类的剩余输入（残差兜底）", colorVar: "--call-other" },
-  ];
-  const parts = defs
-    .map((d) => ({ ...d, value: sum(d.key) }))
-    .filter((p) => p.value > 0);
-  return { parts, total: scoped.reduce((acc, c) => acc + c.total, 0) };
+/**
+ * 把真实的 fresh 按各来源的字符估算占比分摊。
+ *
+ * 为什么是分摊而不是直接取值：fresh（input + cacheWrite）是 API 上报的真值，
+ * 但它内部哪部分是文件、哪部分是工具结果，API 不提供。若直接画估算值，
+ * 柱高会与真实新增对不上（经常超出），所以柱高锁死真值、分段按比例缩放。
+ */
+function allocateFresh(
+  fresh: number,
+  items: Array<{ key: string; label: string; desc?: string; colorVar: string; est: number }>,
+): CallPart[] {
+  if (fresh <= 0) return [];
+
+  /** 没命中缓存、被整段重算的旧上下文（典型：新一轮开始、缓存过期） */
+  const miss: CallPart = {
+    key: "miss",
+    label: "未归因（旧上下文/截断）",
+    desc: "新增里无法归到具体来源的部分：可能是没命中缓存、被整段重算的旧上下文，也可能是采集端截断的系统提示 / 未记录的工具定义",
+    colorVar: "--call-other",
+    value: 0,
+  };
+
+  const totalEst = items.reduce((acc, i) => acc + Math.max(i.est, 0), 0);
+  if (totalEst <= 0) {
+    return [{ ...miss, value: fresh }];
+  }
+
+  const toParts = (list: Array<{ key: string; label: string; desc?: string; colorVar: string; value: number }>) =>
+    list
+      .filter((i) => i.value > 0)
+      .map((i) => ({ key: i.key, label: i.label, desc: i.desc, colorVar: i.colorVar, value: i.value }));
+
+  // 新内容估算量没超过真实新增 → 估算值直接用，差额即"旧上下文未命中"
+  if (totalEst <= fresh) {
+    const kept = items.map((i) => ({
+      key: i.key,
+      label: i.label,
+      desc: i.desc,
+      colorVar: i.colorVar,
+      value: Math.max(Math.round(i.est), 0),
+    }));
+    const sum = kept.reduce((acc, i) => acc + i.value, 0);
+    if (sum > fresh && kept.length > 0) {
+      // 逐项舍入后反超真实值：从最大项里扣回，避免柱子超出坐标轴上沿
+      let idx = 0;
+      for (let i = 1; i < kept.length; i++) if (kept[i].value > kept[idx].value) idx = i;
+      kept[idx].value = Math.max(kept[idx].value - (sum - fresh), 0);
+    }
+    const rest = fresh - kept.reduce((acc, i) => acc + i.value, 0);
+    return toParts([...kept, { ...miss, value: rest }]);
+  }
+
+  // 估算量超过真实新增（字符估算偏大）→ 等比缩放，不产生未命中项
+  const scaled = items.map((i) => ({
+    key: i.key,
+    label: i.label,
+    desc: i.desc,
+    colorVar: i.colorVar,
+    value: Math.round((fresh * Math.max(i.est, 0)) / totalEst),
+  }));
+  const kept = toParts(scaled);
+  // 最大余数法：把舍入差补到体量最大的那一项，保证 Σ value === fresh
+  const diff = fresh - kept.reduce((acc, i) => acc + i.value, 0);
+  if (diff !== 0 && kept.length > 0) {
+    let idx = 0;
+    for (let i = 1; i < kept.length; i++) if (kept[i].value > kept[idx].value) idx = i;
+    kept[idx].value += diff;
+  }
+  return kept;
 }

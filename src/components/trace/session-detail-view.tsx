@@ -12,7 +12,6 @@ import { SessionTreePanel } from "./session-tree-panel";
 import {
   buildCalls,
   compressIdleGaps,
-  cumulativeParts,
   displayDurationMs,
   flattenSession,
   isFailed,
@@ -48,7 +47,7 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
   // 选中的 Token 调用柱（view: "cum" = 累计构成 / "delta" = 本次新增构成）
-  const [selectedCall, setSelectedCall] = useState<{ id: string; view: "cum" | "delta" } | null>(
+  const [selectedCall, setSelectedCall] = useState<{ id: string; view: "prompt" | "new" } | null>(
     null,
   );
   const [view, setView] = useState<"timeline" | "transcript">("timeline");
@@ -433,7 +432,6 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
               <CallBreakdownPanel
                 call={selectedCallInfo}
                 view={selectedCall.view}
-                calls={calls}
                 onBack={() => setSelectedCall(null)}
               />
             ) : selectedSpan ? (
@@ -868,22 +866,17 @@ function Pre({ text }: { text: string }) {
 function CallBreakdownPanel({
   call,
   view,
-  calls,
   onBack,
 }: {
   call: CallInfo;
-  view: "cum" | "delta";
-  calls: CallInfo[];
+  view: "prompt" | "new";
   onBack: () => void;
 }) {
-  // delta 视图 = 该次调用的新增构成；cum 视图 = 截至该次调用的累计构成
-  const { parts, total } = useMemo(() => {
-    if (view === "delta") {
-      return { parts: call.parts, total: call.total };
-    }
-    const agg = cumulativeParts(calls, call.order);
-    return { parts: agg.parts, total: agg.total };
-  }, [view, call, calls]);
+  // 三档真值：上下文规模 / 新增（未命中缓存）/ 复用（缓存读）
+  const prompt = Math.max(call.prompt, 1);
+  const freshPct = (call.fresh / prompt) * 100;
+  const reusePct = (call.reuse / prompt) * 100;
+  const fresh = Math.max(call.fresh, 1);
 
   return (
     <div>
@@ -897,7 +890,7 @@ function CallBreakdownPanel({
           ← 返回
         </button>
         <h3 className="text-[15px] font-medium">
-          {view === "delta" ? `第 ${call.order} 次 LLM 调用 · 本次新增` : `前 ${call.order} 次调用 · 累计构成`}
+          第 {call.order} 次 LLM 调用 · {view === "prompt" ? "上下文构成" : "新增构成"}
         </h3>
       </div>
 
@@ -917,13 +910,46 @@ function CallBreakdownPanel({
         )}
       </div>
 
-      {/* 构成占比列表 */}
+      {/* 三档真实值 */}
+      <div className="mb-4 space-y-2.5">
+        <TokenRow
+          label="上下文规模"
+          value={call.prompt}
+          pct={100}
+          colorVar="--muted-foreground"
+          desc="input + 缓存读 + 缓存写"
+        />
+        <TokenRow
+          label="新增（未命中缓存）"
+          value={call.fresh}
+          pct={freshPct}
+          colorVar="--chart-new"
+          desc="本次新拼入上下文的部分"
+        />
+        <TokenRow
+          label="复用（缓存读）"
+          value={call.reuse}
+          pct={reusePct}
+          colorVar="--chart-bar-in"
+          desc="命中提示缓存的已有前缀，无需重新计算"
+        />
+        <div className="flex items-center justify-between border-t border-border/60 pt-2 text-xs">
+          <span className="text-muted-foreground">本次输出（不计入输入）</span>
+          <span className="font-mono">{formatTokens(call.output)}</span>
+        </div>
+      </div>
+
+      {/* 新增内部构成（估算） */}
+      <div className="mb-2 flex items-baseline justify-between">
+        <span className="text-xs font-medium">新增内部构成</span>
+        <span className="text-[10px] text-muted-foreground/70">按来源字符数估算</span>
+      </div>
       <div className="space-y-2.5">
-        {parts.length === 0 && (
-          <p className="text-xs text-muted-foreground">该调用无 Token 构成数据</p>
+        {call.parts.length === 0 && (
+          <p className="text-xs text-muted-foreground">该调用没有新增输入（全部命中缓存）</p>
         )}
-        {parts.map((p) => {
-          const pct = total > 0 ? (p.value / total) * 100 : 0;
+        {call.parts.map((p) => {
+          const pct = (p.value / fresh) * 100;
           return (
             <div key={p.key} title={p.desc}>
               <div className="flex items-center gap-2 text-xs">
@@ -937,18 +963,12 @@ function CallBreakdownPanel({
                   {pct.toFixed(1)}%
                 </span>
               </div>
-              {/* 占比条 */}
               <div className="mt-1 ml-[18px] h-1.5 overflow-hidden rounded-full bg-muted/60">
                 <div
                   className="h-full rounded-full"
                   style={{ width: `${Math.min(pct, 100)}%`, background: `var(${p.colorVar})` }}
                 />
               </div>
-              {p.desc && (
-                <p className="ml-[18px] mt-1 text-[10px] leading-relaxed text-muted-foreground/70">
-                  {p.desc}
-                </p>
-              )}
             </div>
           );
         })}
@@ -956,18 +976,53 @@ function CallBreakdownPanel({
 
       {/* 合计 + 说明 */}
       <div className="mt-4 flex items-center justify-between border-t border-border pt-3 text-xs">
-        <span className="text-muted-foreground">
-          {view === "delta" ? "本次新增合计" : "累计合计"}
-        </span>
-        <span className="font-mono text-sm font-semibold">{formatTokens(total)}</span>
+        <span className="text-muted-foreground">新增合计</span>
+        <span className="font-mono text-sm font-semibold">{formatTokens(call.fresh)}</span>
       </div>
       <p className="mt-3 text-[10px] leading-relaxed text-muted-foreground/70">
-        说明：total = input + output + 缓存读 + 缓存写。缓存读 = 命中提示缓存的输入
-        （与之前重复的前缀直接复用、无需重新计算），缓存写 = 新写入缓存的输入；
-        两者为 API 上报的真实值，多轮会话中缓存读通常是最大成分。
-        assistant / tool 结果 / 用户输入 / 系统提示为按字符数估算（≈4 字符/token），
-        各估算子项超出合计时按比例缩减。
+        口径：上下文规模 = input + 缓存读 + 缓存写（API 上报真实值）；新增 = 未命中缓存的部分
+        = input + 缓存写。新增内部哪部分是文件、哪部分是工具结果，API 不提供，按各来源字符数
+        估算（≈4 字符/token，汉字按 0.7 token/字）；填不满的部分记为「未归因」——多为没命中
+        缓存被整段重算的旧上下文，或采集端截断的系统提示 / 未记录的工具定义。
       </p>
+      <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground/70">
+        多数采集端不上报缓存写（本库真实会话为 0），因此新增实际等于未缓存的 input，
+        量级通常只有几百 token —— 这是正常的，不是漏算。
+      </p>
+    </div>
+  );
+}
+
+/** 一行 token 真值：颜色块 + 名称 + 数值 + 占比条 */
+function TokenRow({
+  label,
+  value,
+  pct,
+  colorVar,
+  desc,
+}: {
+  label: string;
+  value: number;
+  pct: number;
+  colorVar: string;
+  desc?: string;
+}) {
+  return (
+    <div title={desc}>
+      <div className="flex items-center gap-2 text-xs">
+        <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: `var(${colorVar})` }} />
+        <span className="flex-1 truncate">{label}</span>
+        <span className="font-mono font-medium">{formatTokens(value)}</span>
+        <span className="w-12 shrink-0 text-right font-mono text-muted-foreground">
+          {pct.toFixed(1)}%
+        </span>
+      </div>
+      <div className="mt-1 ml-[18px] h-1.5 overflow-hidden rounded-full bg-muted/60">
+        <div
+          className="h-full rounded-full"
+          style={{ width: `${Math.min(pct, 100)}%`, background: `var(${colorVar})` }}
+        />
+      </div>
     </div>
   );
 }
