@@ -440,3 +440,44 @@ UI：Agent 详情页的 `AgentIssueList` 每项增加「标记已修 / 生成回
 7. 第 13-15 天：M4。
 
 M1 结束时应停下来做一次判断：把 30 条 Finding 与实际修复记录对齐，若平台检出率低于 50%，先别做 M2/M3，回头增强检测。
+
+---
+
+## 十一、执行日志
+
+### 2026-11-02 · B1 错误语义化 + B2 失败因果链（已完成）
+
+**新增文件**
+
+| 文件 | 职责 |
+|---|---|
+| `src/lib/engine/detect/error-signature.ts` | 把 `Span.error` 归一为 `{kind, key, family, errorClass, target, summary, garbled}`；13 类签名 |
+| `src/lib/engine/detect/failure-chain.ts` | 还原「失败 → 重试 → 结局」，输出 `retried_recovered / retried_failed / abandoned / fatal / isolated` |
+| `src/lib/engine/detect/remediation.ts` | 确定性根因假设 + 修复动作（不依赖 LLM，可解释） |
+| `scripts/analyze-agent.cjs` | CLI：按 Agent + 时间窗输出异常排行与明细 |
+
+**新增 npm 脚本**：`detect:build`（编译检测模块到 `.tmp-verify/`，已 gitignore）、`detect:analyze`。
+
+用法：`npm run detect:build && npm run detect:analyze -- <agentName|all> <days>`
+
+**实测结果（近 180 天，243 会话 / 349 条工具错误）**
+
+```
+出现异常链的会话 69
+异常链 281：重试自愈 237 / 未修复即交付 20 / 孤立失败 10 / 致命失败 11 / 连续失败 3
+需处理 23
+```
+
+三个可复用的结论：
+
+1. **84% 的工具失败是重试后自愈的。** 按 `errorCount` 或「错误 span 数」排名会把这 237 条当成问题，夸大约 10 倍。严重度必须由结局决定，这是 `failure-chain` 存在的唯一理由。
+2. **分类质量达标**：`unknown` 4.6%（目标 < 20%），`not_an_error` 误写 5 条被单独剔除，用户主动中止 2 条已降级为 info。
+3. **问题集中在四类**：pydantic 数据校验失败（8 条 / 4 会话）、编辑定位失败（3 条）、JSON 不合法、编码不一致。这四类都属于「Agent 生成的数据不合规」，是可修的确定性问题，不是模型能力问题。
+
+**已知限制（需采集端配合）**
+
+- 90 条（25.8%）error 文本含 U+FFFD（GBK 写入、UTF-8 解读），摘要不可读。签名仍能分类，但 UI 必须显式标注「原文编码损坏」，不能让用户对着乱码猜。
+- `exit_code` 类 63 条无法进一步归因：脚本只输出退出码，不输出结构化原因。
+
+**下一步**：B4 标注集（30 条）→ Diagnoser（8 类根因 + 证据）→ 接入 Agent 详情页。
+

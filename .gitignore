@@ -54,3 +54,6 @@ scripts/offline-server-pkg-win64/
 
 # 数据库与图标的本地备份（如 prisma/dev.db.bak-YYYYMMDD），不入库
 *.bak-*
+
+# 检测模块的 CommonJS 编译产物（npm run detect:build 生成，供 scripts/*.cjs 使用）
+.tmp-verify/
