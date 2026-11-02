@@ -7,7 +7,15 @@
  *   node scripts/diagnose-cli.cjs pptagent1022   # 指定 Agent
  *   node scripts/diagnose-cli.cjs all 5          # 只跑前 5 条（试水/省钱）
  *
+ * 可选覆盖：
+ *   --api-key/--base-url/--model   覆盖设置页的模型配置
+ *   --timeout 180000               单条超时（ms，默认 180000；小模型在 8K 证据下可能 60s+）
+ *   --concurrency 2                并发（默认 2；4B 模型并发高会被拖慢甚至超时）
+ *   --no-cache                     忽略已诊断缓存，全部重跑
+ *
  * 产出：.tmp-verify/diagnosis-report.md（含每条的对/错/半对勾选框）
+ * 缓存：.tmp-verify/diagnosis-cache.json，按「模型::spanId」索引。超时/断跑后重跑只补失败的那几条，
+ *       不重复花钱，也不会让报告里出现两条重复的诊断。
  * 依赖 .tmp-verify 下的编译产物（见 detect:build）。
  */
 const fs = require("node:fs");
@@ -20,8 +28,45 @@ const { diagnose, ROOT_CAUSE_LABEL } = require("../.tmp-verify/diagnoser.js");
 const { buildRecurrence, weekBuckets } = require("../.tmp-verify/recurrence.js");
 
 const prisma = new PrismaClient();
-const OUT = path.join(__dirname, "..", ".tmp-verify", "diagnosis-report.md");
-const CONCURRENCY = 3;
+const OUT_DIR = path.join(__dirname, "..", ".tmp-verify");
+let OUT = path.join(OUT_DIR, "diagnosis-report.md");
+const CACHE_FILE = path.join(__dirname, "..", ".tmp-verify", "diagnosis-cache.json");
+// 报告里的会话深链要能直接点开，必须是完整 origin
+const TRACE_BASE = process.env.TRACE_BASE_URL || "http://localhost:3010";
+let CONCURRENCY = 2;
+
+// node 不会自动读 .env（那是 Next 运行时的事）。这里手动加载，好让 DIAG_LLM_* 放在 .env 里，
+// 而不是写进被 git 跟踪的 dev.db —— 否则 key 会随提交进仓库历史。
+(function loadDotEnv() {
+  try {
+    const p = path.join(__dirname, "..", ".env");
+    if (!fs.existsSync(p)) return;
+    for (const line of fs.readFileSync(p, "utf8").split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*)$/);
+      if (!m) continue;
+      const v = m[2].trim().replace(/^["']|["']$/g, "");
+      if (!(m[1] in process.env)) process.env[m[1]] = v;
+    }
+  } catch {
+    /* .env 缺失或不可读都不影响：还有命令行与设置页两条路 */
+  }
+})();
+
+function loadCache() {
+  try {
+    return JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveCache(cache) {
+  try {
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 1));
+  } catch (e) {
+    console.warn(`缓存写入失败（不影响报告）：${e.message}`);
+  }
+}
 
 function clip(s, n) {
   const t = String(s ?? "").trim();
@@ -37,12 +82,13 @@ function clip(s, n) {
 async function loadLlmConfig(cli) {
   const env = process.env;
   const pick = (k, e) => cli[k] || env[e] || "";
+  const timeoutMs = Number(cli.timeoutMs) > 0 ? Number(cli.timeoutMs) : 180_000;
   let base = {
     apiKey: pick("apiKey", "DIAG_LLM_API_KEY"),
     baseUrl: pick("baseUrl", "DIAG_LLM_BASE_URL"),
     model: pick("model", "DIAG_LLM_MODEL"),
   };
-  if (base.apiKey && base.baseUrl && base.model) return base;
+  if (base.apiKey && base.baseUrl && base.model) return { ...base, timeoutMs };
 
   const s = await prisma.userSettings.findUnique({ where: { user: "default" } });
   if (!s) throw new Error("没有 UserSettings 记录，先用 --api-key/--base-url/--model 指定模型");
@@ -53,6 +99,7 @@ async function loadLlmConfig(cli) {
     apiKey: base.apiKey || cfg.apiKey,
     baseUrl: base.baseUrl || cfg.baseUrl,
     model: base.model || cfg.model,
+    timeoutMs,
   };
 }
 
@@ -78,16 +125,23 @@ async function mapPool(items, limit, fn) {
 
 (async () => {
   const dryRun = process.argv.includes("--dry-run");
+  const noCache = process.argv.includes("--no-cache");
   // --flag value 形式的覆盖项单独摘出，避免它的值被当成 Agent 名
-  const VALUE_FLAGS = new Set(["--api-key", "--base-url", "--model"]);
+  const VALUE_FLAGS = {
+    "--api-key": "apiKey",
+    "--base-url": "baseUrl",
+    "--model": "model",
+    "--timeout": "timeoutMs",
+    "--concurrency": "concurrency",
+    "--out": "out",
+  };
   const cli = {};
   const positional = [];
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (VALUE_FLAGS.has(a)) {
-      const key = a === "--api-key" ? "apiKey" : a === "--base-url" ? "baseUrl" : "model";
-      cli[key] = argv[++i] ?? "";
+    if (VALUE_FLAGS[a]) {
+      cli[VALUE_FLAGS[a]] = argv[++i] ?? "";
       continue;
     }
     if (a.startsWith("--")) continue;
@@ -95,11 +149,16 @@ async function mapPool(items, limit, fn) {
   }
   const argAgent = positional[0] && positional[0] !== "all" ? positional[0] : null;
   const limitArg = Number(positional[1] ?? 0);
+  if (Number(cli.concurrency) > 0) CONCURRENCY = Number(cli.concurrency);
+  const timeoutMs = Number(cli.timeoutMs) > 0 ? Number(cli.timeoutMs) : 180_000;
+  // 允许指定输出文件：报告一旦交付就要被人手写标注（[x]），重跑不能覆盖它
+  if (cli.out) OUT = path.isAbsolute(cli.out) ? cli.out : path.join(OUT_DIR, cli.out);
 
   const cfg = dryRun
     ? { model: "(dry-run 不调模型)", baseUrl: "" }
-    : await loadLlmConfig(cli);
+    : await loadLlmConfig({ ...cli, timeoutMs });
   console.log(dryRun ? "模式：dry-run（只装配证据，不调用模型）" : `模型：${cfg.model} @ ${cfg.baseUrl}`);
+  if (!dryRun) console.log(`超时 ${cfg.timeoutMs}ms / 并发 ${CONCURRENCY}${noCache ? " / 忽略缓存" : ""}`);
 
   const agents = await prisma.agent.findMany({
     where: argAgent ? { name: argAgent } : {},
@@ -247,14 +306,35 @@ async function mapPool(items, limit, fn) {
   console.log(`待诊断 ${targets.length} 条，本次跑 ${list.length} 条（并发 ${CONCURRENCY}）`);
 
   let done = 0;
+  const cache = noCache || dryRun ? {} : loadCache();
+  const cacheKey = (t) => `${cfg.model}::${t.spanId}`;
+  const cachedCount = dryRun ? 0 : list.filter((t) => cache[cacheKey(t)]).length;
+  if (cachedCount > 0) console.log(`命中缓存 ${cachedCount} 条，需新跑 ${list.length - cachedCount} 条`);
+
   const results = dryRun
     ? list.map((t) => ({ ...t, diagnosis: null, ms: 0 }))
     : await mapPool(list, CONCURRENCY, async (t) => {
+        const hit = cache[cacheKey(t)];
+        // 失败也缓存：这条模型跑不通（超时/网关断连），重跑只会再等十几分钟。
+        // 缓存键含模型名，换模型会自然重跑；要强制重试用 --no-cache。
+        if (hit && hit.__error) return { ...t, error: hit.__error, ms: 0, cached: true };
+        if (hit) return { ...t, diagnosis: hit, ms: 0, cached: true };
         const t0 = Date.now();
-        const d = await diagnose(t.input, cfg);
-        done += 1;
-        process.stderr.write(`\r  进度 ${done}/${list.length}  最近 ${Date.now() - t0}ms      `);
-        return { ...t, diagnosis: d, ms: Date.now() - t0 };
+        try {
+          const d = await diagnose(t.input, cfg);
+          cache[cacheKey(t)] = d;
+          saveCache(cache); // 每跑完一条就落盘，中途断掉不用重跑已完成的
+          done += 1;
+          process.stderr.write(`\r  进度 ${done}/${list.length - cachedCount}  最近 ${Date.now() - t0}ms      `);
+          return { ...t, diagnosis: d, ms: Date.now() - t0 };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          cache[cacheKey(t)] = { __error: msg };
+          saveCache(cache);
+          done += 1;
+          process.stderr.write(`\r  进度 ${done}/${list.length - cachedCount}  最近失败 ${Date.now() - t0}ms      `);
+          throw e;
+        }
       });
   if (!dryRun) process.stderr.write("\n");
 
@@ -275,7 +355,11 @@ async function mapPool(items, limit, fn) {
   lines.push(`- 生成时间：${now}`);
   lines.push(`- 模型：${cfg.model}`);
   lines.push(`- 范围：${argAgent ?? "全部 Agent"}｜待处理失败链 ${targets.length} 条，本次${dryRun ? "装配" : "诊断"} ${list.length} 条`);
-  if (!dryRun) lines.push(`- 成功 ${ok.length} 条，失败 ${failed.length} 条`);
+  if (!dryRun) {
+    const deg = ok.filter((r) => r.diagnosis?.degraded).length;
+    lines.push(`- 成功 ${ok.length} 条，失败 ${failed.length} 条${deg > 0 ? `（其中 ${deg} 条证据被裁剪，结论可信度偏低）` : ""}`);
+    lines.push(`- ⚠️ 失败 ≠ 没有根因：这些是模型处理不了的输入，不计入你的标注，但也不该当成已解决。`);
+  }
   lines.push("");
   if (dist.size > 0) {
     lines.push(`## 根因分布`);
@@ -301,15 +385,20 @@ async function mapPool(items, limit, fn) {
     lines.push("");
     lines.push(`- Agent：\`${r.agentName}\``);
     if (r.error) {
+      // 失败条目也要给全身份，否则看不出漏掉的是哪一次失败、也没法补跑
+      lines.push(`- 接口：\`${r.input.tool}\`｜错误形态：${r.input.errorKindLabel}（\`${r.input.errorKind}\`）｜结局：${r.input.outcome}（尝试 ${r.input.attempts} 次）`);
+      lines.push(`- 会话：[${r.sessionId.slice(0, 8)}](${TRACE_BASE}/trace/${r.sessionId}?spanId=${encodeURIComponent(r.spanId)})`);
       lines.push("");
-      lines.push(`> 诊断失败：${r.error}`);
+      lines.push(`> 模型未能给出结论：${r.error}${r.cached ? "（缓存自上次失败，未重试）" : ""}`);
+      lines.push(`> 这一条**不计入**你的标注，但也不能当成"没有根因"——是模型处理不了这条输入。`);
       lines.push("");
       lines.push("---");
       lines.push("");
       return;
     }
     lines.push(`- 接口：\`${r.input.tool}\`｜错误形态：${r.input.errorKindLabel}（\`${r.input.errorKind}\`）｜结局：${r.input.outcome}（尝试 ${r.input.attempts} 次）`);
-    lines.push(`- 会话：[${r.sessionId.slice(0, 8)}](/trace/${r.sessionId}?spanId=${encodeURIComponent(r.spanId)})`);
+    // 必须带 origin：markdown 预览里相对路径 /trace/... 点不开，会落到编辑器本地文件协议
+    lines.push(`- 会话：[${r.sessionId.slice(0, 8)}](${TRACE_BASE}/trace/${r.sessionId}?spanId=${encodeURIComponent(r.spanId)})`);
     if (r.input.recurrence) lines.push(`- 复发：${r.input.recurrence}`);
 
     if (dryRun) {
@@ -352,7 +441,7 @@ async function mapPool(items, limit, fn) {
 
     const d = r.diagnosis;
     lines.push("");
-    lines.push(`**LLM 判定**：\`${d.rootCause}\`（${ROOT_CAUSE_LABEL[d.rootCause] ?? d.rootCause}）　置信度 ${d.confidence.toFixed(2)}　耗时 ${r.ms}ms`);
+    lines.push(`**LLM 判定**：\`${d.rootCause}\`（${ROOT_CAUSE_LABEL[d.rootCause] ?? d.rootCause}）　置信度 ${d.confidence.toFixed(2)}　耗时 ${r.cached ? "缓存" : `${r.ms}ms`}${d.degraded ? "　⚠️ 证据被裁剪（原证据超时）" : ""}`);
     lines.push("");
     lines.push(`> ${d.narrative.replace(/\n/g, " ")}`);
     lines.push("");

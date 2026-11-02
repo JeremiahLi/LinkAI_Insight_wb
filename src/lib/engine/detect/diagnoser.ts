@@ -87,12 +87,19 @@ export interface Diagnosis {
   suggestion: string;
   /** 0-1 */
   confidence: number;
+  /**
+   * 证据被裁剪过（原证据超时，砍半后重试成功）。
+   * 必须透出到 UI/报告：这种结论的可信度低于完整证据，不能混在一起看。
+   */
+  degraded?: boolean;
 }
 
 export interface LlmConfig {
   apiKey: string;
   baseUrl: string;
   model: string;
+  /** 单次请求超时。小模型（如 4B）在 8K 上下文下可能跑 60s+，90s 会误杀 */
+  timeoutMs?: number;
 }
 
 const MAX_INPUT_CHARS = 8000;
@@ -194,8 +201,8 @@ async function callChat(cfg: LlmConfig, system: string, user: string, temperatur
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
-    // 单条诊断 90s 超时：CLI 会跑几十条，不能因为一次挂起卡死整批
-    signal: AbortSignal.timeout(90_000),
+    // 超时可配：默认 120s。CLI 会跑几十条，不能因为一次挂起卡死整批
+    signal: AbortSignal.timeout(cfg.timeoutMs ?? 120_000),
     body: JSON.stringify({
       model: cfg.model,
       temperature,
@@ -214,10 +221,10 @@ async function callChat(cfg: LlmConfig, system: string, user: string, temperatur
 }
 
 /**
- * 诊断一条失败链。
- * 解析失败会重试一次（温度降为 0），仍失败则抛错由调用方记录，不静默吞掉。
+ * 单轮尝试：正常温度一次，解析失败降温度重试一次。
+ * 网络/超时错误直接抛出（重试同样的输入只会再超时一次）。
  */
-export async function diagnose(input: DiagnosisInput, cfg: LlmConfig): Promise<Diagnosis> {
+async function attempt(input: DiagnosisInput, cfg: LlmConfig): Promise<Diagnosis> {
   const user = buildDiagnosisUserPrompt(input);
   const first = await callChat(cfg, SYSTEM_PROMPT, user, 0.2);
   const parsed = parseDiagnosis(first);
@@ -227,6 +234,47 @@ export async function diagnose(input: DiagnosisInput, cfg: LlmConfig): Promise<D
   const parsedRetry = parseDiagnosis(retry);
   if (parsedRetry) return parsedRetry;
   throw new Error(`无法解析模型输出：${stripFence(retry || first).slice(0, 200)}`);
+}
+
+function isTimeoutLike(e: unknown): boolean {
+  const msg = e instanceof Error ? `${e.name} ${e.message}` : String(e);
+  return /timeout|timed out|abort/i.test(msg);
+}
+
+function cut(s: string | undefined, n: number): string {
+  const t = (s ?? "").trim();
+  return t.length > n ? t.slice(0, n) : t;
+}
+
+/**
+ * 诊断一条失败链。
+ *
+ * 失败路径：
+ * 1. 解析不出 JSON → 降温度重试（在 attempt 内）。
+ * 2. 超时 → 证据砍半再试一次，成功则标记 degraded。
+ *    超时基本是「证据太长、模型解码慢」，不是网络抖动；原样重试只会再超时一次。
+ *    砍证据会掉信息，所以必须标记 degraded，不能和完整证据的结论等同看待。
+ * 3. 其它错误（401/402/5xx）直接抛，由调用方记录，不静默吞掉。
+ */
+export async function diagnose(input: DiagnosisInput, cfg: LlmConfig): Promise<Diagnosis> {
+  try {
+    return await attempt(input, cfg);
+  } catch (e) {
+    if (!isTimeoutLike(e)) throw e;
+    const trimmed: DiagnosisInput = {
+      ...input,
+      spanInput: cut(input.spanInput, 800),
+      errorText: cut(input.errorText, 1200),
+      spanOutput: cut(input.spanOutput, 400),
+      toolSequence: cut(input.toolSequence, 240),
+      prevSpan: cut(input.prevSpan, 200),
+      nextSpan: cut(input.nextSpan, 200),
+      taskIntent: cut(input.taskIntent, 300),
+      roundIntent: cut(input.roundIntent, 300),
+    };
+    const d = await attempt(trimmed, cfg);
+    return { ...d, degraded: true };
+  }
 }
 
 /** 给报告用：把根因枚举转中文标签 */
