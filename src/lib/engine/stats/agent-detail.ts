@@ -4,6 +4,8 @@ import { scoreHealth, successRateOf, HEALTH_WINDOW_DAYS, type HealthScore } from
 import { getAgentBoard, type AgentBoardRow } from "./agent-board";
 import { SQL_BAD, SQL_FINISHED, SQL_PARTIAL } from "./session-outcome";
 import { buildBucketKeys, bucketLabel, type TrendGranularity } from "./trend";
+import { signatureOf, ERROR_KIND_LABEL, type ErrorSignatureKind } from "@/lib/engine/detect/error-signature";
+import { extractPayload, normalizeCommandSignature } from "@/lib/engine/detect/command-stats";
 
 /**
  * 单 Agent 下钻聚合（单一视角）。
@@ -185,6 +187,57 @@ export function normalizeError(raw: string): string {
 
 const SEVERITY_ORDER: Record<IssueSeverity, number> = { critical: 0, warning: 1, info: 2 };
 
+/**
+ * 单个工具的失败洞察：失败集中在哪些命令/文件、错误属于哪几类。
+ *
+ * 为什么需要：原来只有「bash 失败 12 次（26.1%）」+ 一句「检查入参构造」的通用处方，
+ * 用户（Agent 开发者）看完仍然不知道该改哪一行。这里把失败 span 归一到命令签名，
+ * 直接指出「12 次里有 18 次是 python merge.py」这种可核对的事实。
+ *
+ * `not_an_error` 要剔除：那是采集端把正常输出写进 error 的脏数据，算进去会把分布带偏。
+ */
+function summarizeToolFailures(
+  spans: { name: string; input: string; error: string }[],
+  toolName: string,
+): {
+  points: { label: string; count: number; share: number }[];
+  kinds: { kind: ErrorSignatureKind; label: string; count: number }[];
+  /** 被剔除的「日志误写」条数：失败数会比类型分布之和大，必须解释，否则用户会以为漏统计 */
+  misrecorded: number;
+} {
+  const classified = spans.map((f) => ({
+    f,
+    kind: signatureOf({ error: f.error, name: f.name, status: "failed" }).kind,
+  }));
+  const real = classified.filter((x) => x.kind !== "not_an_error");
+  const total = real.length || 1;
+
+  const pointMap = new Map<string, { label: string; count: number }>();
+  const kindMap = new Map<ErrorSignatureKind, number>();
+
+  for (const { f, kind } of real) {
+    kindMap.set(kind, (kindMap.get(kind) ?? 0) + 1);
+    const payload = extractPayload(f.input);
+    if (!payload) continue;
+    const { signature, label } = normalizeCommandSignature(payload, toolName.toLowerCase());
+    const hit = pointMap.get(signature);
+    if (hit) hit.count += 1;
+    else pointMap.set(signature, { label, count: 1 });
+  }
+
+  const points = [...pointMap.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 3)
+    .map((p) => ({ ...p, share: (p.count / total) * 100 }));
+
+  const kinds = [...kindMap.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([kind, count]) => ({ kind, label: ERROR_KIND_LABEL[kind] ?? kind, count }));
+
+  return { points, kinds, misrecorded: classified.length - real.length };
+}
+
 /* -------------------------------- 主函数 -------------------------------- */
 
 export async function getAgentDetail(
@@ -273,9 +326,13 @@ export async function getAgentDetail(
       LIMIT 10
     `,
     // D4 失败 span 明细（供错误聚类 + 工具取证）
+    // input 是「哪个命令/哪个文件失败」的唯一来源。
+    // 截断 1200 字：命令本身很少超长，但 edit 的 oldText 可能几 KB，全取会放大内存；
+    // command-stats 的解析器对截断 JSON 有正则兜底，截断不会产生垃圾签名
     prisma.$queryRaw<Record<string, unknown>[]>`
       SELECT sp.id AS id, sp.sessionId AS sessionId, sp.kind AS kind, sp.name AS name,
-             sp.error AS error, sp.duration AS duration, sp.createdAt AS createdAt
+             sp.error AS error, sp.duration AS duration, sp.createdAt AS createdAt,
+             substr(COALESCE(sp.input, ''), 1, 1200) AS input
       FROM Span sp
       JOIN Session s ON sp.sessionId = s.id
       WHERE s.agentId = ${agentId} AND s.startTime >= ${startMs} AND sp.status = 'failed'
@@ -434,6 +491,7 @@ export async function getAgentDetail(
       kind: String(r.kind),
       name: String(r.name || ""),
       error: String(raw.error ?? ""),
+      input: String(raw.input ?? ""),
       at: num(raw.createdAt),
     };
   });
@@ -553,16 +611,48 @@ export async function getAgentDetail(
     .slice(0, 3);
   for (const tool of badTools) {
     const toolFailSpans = failedSpansList.filter((f) => f.kind === "tool_call" && f.name === tool.name);
+    const insight = summarizeToolFailures(toolFailSpans, tool.name);
+    const lead = insight.points[0];
+
+    // 标题直接带上主导失败点：不展开也能看出「该先查什么」。
+    // label 截断到 28 字：文件名/命令偶尔会带超长路径，会把标题撑成一段话
+    const leadLabel = lead ? (lead.label.length > 28 ? `${lead.label.slice(0, 28)}…` : lead.label) : "";
+    const title =
+      `${tool.name} 失败 ${tool.failed} 次（${(tool.failRate ?? 0).toFixed(1)}%）` +
+      (lead ? `，${leadLabel} 占 ${lead.share.toFixed(0)}%` : "");
+
+    const evidence: string[] = [
+      `调用 ${tool.value} 次，失败 ${tool.failed} 次，平均耗时 ${tool.sub?.replace("均 ", "") ?? "—"}，` +
+        `占该 Agent 全部工具失败的 ${(((tool.failed ?? 0) / Math.max(toolFailed, 1)) * 100).toFixed(0)}%`,
+    ];
+    if (insight.points.length > 0) {
+      const clip = (s: string) => (s.length > 24 ? `${s.slice(0, 24)}…` : s);
+      evidence.push(
+        `失败集中在 ${insight.points
+          .map((p) => `${clip(p.label)} ×${p.count}（${p.share.toFixed(0)}%）`)
+          .join("、")}`,
+      );
+    }
+    if (insight.kinds.length > 0) {
+      evidence.push(
+        `错误类型 ${insight.kinds.map((k) => `${k.label} ×${k.count}`).join("、")}` +
+          (insight.misrecorded > 0 ? `（另有 ${insight.misrecorded} 条为日志误写，已剔除）` : ""),
+      );
+    }
+    if (toolFailSpans.length > 0 && toolFailSpans.length < (tool.failed ?? 0)) {
+      evidence.push(`以上分布基于最近 ${toolFailSpans.length} 条失败样例（该区间共 ${tool.failed} 次失败）`);
+    }
+
     issues.push({
       id: `tool-${tool.name}`,
       severity: (tool.failRate ?? 0) >= 20 ? "critical" : "warning",
       kind: "tool_failure",
-      title: `${tool.name} 失败 ${tool.failed} 次（${(tool.failRate ?? 0).toFixed(1)}%）`,
-      evidence: [
-        `调用 ${tool.value} 次，失败 ${tool.failed} 次，平均耗时 ${tool.sub?.replace("均 ", "") ?? "—"}`,
-        `占该 Agent 全部工具失败的 ${(((tool.failed ?? 0) / Math.max(toolFailed, 1)) * 100).toFixed(0)}%`,
-      ],
-      suggestion: `检查该工具入参构造（命令拼接、引号转义、路径存在性）；失败率超过 20% 时应优先处理。`,
+      title,
+      evidence,
+      suggestion: lead
+        ? `${leadLabel} 独占该工具 ${lead.share.toFixed(0)}% 的失败 —— 同一条命令反复失败通常不是命令写错，` +
+          `而是它读写的文件、参数或环境不对，先按下方样例核对这一次的输入，再决定要不要改工具本身。`
+        : `按失败样例逐个核对入参：路径是否存在、引号转义是否正确、编码是否一致；失败率超过 20% 时应优先处理。`,
       links: toolFailSpans.slice(0, 3).map((f, i) => ({
         sessionId: f.sessionId,
         spanId: f.spanId,

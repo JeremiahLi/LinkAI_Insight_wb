@@ -405,3 +405,27 @@ export function normalizeToolName(name: string | undefined): string {
   if (n === "grep" || n === "rg" || n === "search") return "search";
   return n;
 }
+
+/**
+ * 错误类型的展示名。
+ *
+ * 放在引擎层而不是组件层，是因为「问题列表」与「运行异常分析面板」都要用同一套措辞，
+ * 两处各写一份必然漂移（实测已经漂过一次：面板里叫「非零退出」，别处叫「退出码」）。
+ */
+export const ERROR_KIND_LABEL: Record<ErrorSignatureKind, string> = {
+  not_an_error: "日志误写",
+  command_not_found: "命令缺失",
+  encoding: "编码不一致",
+  exception: "运行异常",
+  permission: "权限/占用",
+  missing_path: "路径不存在",
+  io_error: "文件类型错误",
+  shell_syntax: "命令语法错误",
+  edit_mismatch: "编辑定位失败",
+  json_invalid: "JSON 不合法",
+  invalid_argument: "入参越界",
+  timeout: "超时",
+  exit_code: "非零退出",
+  interrupted: "用户中止",
+  unknown: "未归类",
+};

@@ -87,7 +87,7 @@ const MAX_DIFF_TOKENS = 12;
 const OLD_TEXT_MARKER = "--- 待替换片段 ---";
 
 /** 从 span.input 里取出人能读的命令/参数 */
-function extractPayload(input: string | null | undefined): string | null {
+export function extractPayload(input: string | null | undefined): string | null {
   if (!input) return null;
   const raw = input.trim();
   if (!raw) return null;
@@ -114,15 +114,45 @@ function extractPayload(input: string | null | undefined): string | null {
         ? `${path}\n${OLD_TEXT_MARKER}\n${oldStr}`
         : path;
     }
-    // 兜底：取第一个字符串值，避免整段 JSON 糊在界面上
+    // 兜底：取第一个**短**字符串值，避免整段正文糊在界面上（长文本不是参数，是内容）
     for (const v of Object.values(j)) {
-      if (typeof v === "string" && v.trim()) return v.trim();
+      if (typeof v === "string" && v.trim() && v.length <= 200) return v.trim();
     }
     return null;
   } catch {
-    // 非 JSON（旧数据/纯文本），原样使用
-    return raw;
+    // JSON 解析失败有两种情况，都必须靠正则兜底：
+    //   1) 旧数据/纯文本 input（原样就是命令）
+    //   2) **被上游截断的 JSON**（这里实测踩过：SQL 取 substr 400 字后中断，
+    //      直接原样返回会产出 `{"command":"cd` 这种垃圾签名，还进了问题标题）
+    return extractPayloadLenient(raw);
   }
+}
+
+/** 从（可能被截断的）JSON 文本里正则捞出关键字段，不做完整解析 */
+function extractPayloadLenient(raw: string): string | null {
+  const grab = (key: string): string | null => {
+    const m = raw.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`));
+    if (!m) return null;
+    const v = m[1].trim();
+    if (!v) return null;
+    // 捕获组是 JSON 字符串的裸内容，反转义后才能还原换行/引号
+    try {
+      return JSON.parse(`"${m[1]}"`) as string;
+    } catch {
+      return v;
+    }
+  };
+
+  const cmd = grab("command") ?? grab("cmd") ?? grab("script");
+  if (cmd) return cmd;
+
+  const path = grab("path") ?? grab("file_path");
+  const oldText = grab("oldText") ?? grab("old_string");
+  if (path && oldText) return `${path}\n${OLD_TEXT_MARKER}\n${oldText}`;
+  if (path) return path;
+
+  // 完全不是 JSON（旧版纯文本 input）就原样用；否则说明这段文本没有可读字段
+  return raw.startsWith("{") ? null : raw;
 }
 
 function baseName(p: string): string {
@@ -154,17 +184,22 @@ export function normalizeCommandSignature(payload: string, tool: string): { sign
     return { signature: `${heredoc[1]} inline-script`, label: `${heredoc[1]} 内联脚本` };
   }
 
-  // 按连接符切段，跳过纯 cd（它不产生失败语义，且路径噪声大）
+  // 按连接符切段，跳过两类噪声段：
+  //   - 纯 cd：不产生失败语义，且路径噪声大
+  //   - 纯续行符（`\` / `^`）：多行命令按 && 切开后，行尾的续行符会独立成段
   const segments = payload
     .split(/\r?\n/)
     .flatMap((line) => line.split(/&&|\|\||;/))
     .map((s) => s.trim())
-    .filter(Boolean);
-  const significant = segments.find((s) => !/^cd\s/.test(s)) ?? segments[0] ?? payload;
+    .filter(Boolean)
+    .filter((s) => !/^[\\^]+$/.test(s));
+  const significant =
+    segments.find((s) => !/^cd\s/.test(s)) ?? segments[0] ?? payload;
 
   const tokens = significant.split(/\s+/).filter(Boolean);
-  const head = (tokens[0] ?? "").replace(/^[("']+/, "");
-  if (!head) return { signature: "unknown", label: "未知命令" };
+  // 去掉包裹字符：命令可能以引号开头，也可能是被截断的 `\\?\E:\...` 长路径（首个 token 只剩反斜杠）
+  const head = (tokens[0] ?? "").replace(/^[("'\\]+/, "");
+  if (!head || !/[\w.\/-]/.test(head)) return { signature: "unknown", label: "未知命令" };
 
   const h = head.toLowerCase();
 
