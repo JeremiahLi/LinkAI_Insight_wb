@@ -574,3 +574,27 @@ read qc_report.txt          2 / 1  (50%)   成功用 E:\... 绝对路径，失�
 
 
 
+### 2026-11-02 · B 第一步：离线 LLM 根因诊断（代码就绪，待跑批）
+
+**为什么要先离线跑一遍再上 UI**：Diagnoser 的输出是"根因判断"，它和错误签名不同——签名错了一眼能看出来，根因错了会被当成真的，然后据此改错地方。所以先在 23 条上做人工验收（≥8/10 才落库上界面），不达标就说明 prompt 或证据不足，继续调，而不是硬上。
+
+**已实现**
+
+- `src/lib/engine/detect/diagnoser.ts`：8 类封闭根因枚举 + `Diagnosis{rootCause,narrative,evidenceRefs,suggestion,confidence}`；输入按优先级裁剪到 8K；解析失败降 temperature=0 重试一次；不依赖 prisma（配置注入，便于 CLI 直接 require）。
+- `scripts/diagnose-cli.cjs`：取证 → 并发 3 跑批 → 产出 `.tmp-verify/diagnosis-report.md`（每条带 `- [ ] 对　- [ ] 半对　- [ ] 错`）。
+- 模型配置优先级：命令行 `--api-key/--base-url/--model` > 环境变量 `DIAG_LLM_*` > 设置页 activeConfig。余额不足换 key 时不必动数据库。
+
+**证据装配踩到的坑（dry-run 才暴露）**
+
+1. **user span 的正文在 `input`，`output` 恒为空**：原来取 `?.output`，23/23 条「该轮用户诉求」全空。
+2. **续跑轮的 user span 只有「继续」「好」**：光有本轮诉求等于没给任务背景，判断不了目标对不对。补 `taskIntent`（会话首条 user span）并加进 prompt。
+3. **工具序列可能上百步**：只保留失败前最近 20 步，越近越相关。
+4. `errorKind` 原来直接把枚举值填进 `errorKindLabel`，改为走 `ERROR_KIND_LABEL` 中文标签。
+
+**当时的状态**：链路已用本地假 LLM 端到端验证（2 条成功、报告结构正确），真实模型卡在 `deepseek-flash` 余额不足（HTTP 402 Insufficient Balance）。充值或换 key 后直接跑：
+
+```bash
+npm run detect:build
+node scripts/diagnose-cli.cjs          # 或带 --api-key/--base-url/--model
+```
+
