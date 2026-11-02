@@ -13,6 +13,7 @@ import { StackedBarTrendChart } from "@/components/charts/stacked-bar-trend-char
 import { HealthPanel } from "@/components/agent/health-panel";
 import { AgentIssueList } from "@/components/agent/agent-issue-list";
 import { FailureAnalysisPanel } from "@/components/agent/failure-analysis-panel";
+import { SymptomRecurrence } from "@/components/agent/symptom-recurrence";
 import { TopList } from "@/components/agent/top-list";
 import {
   formatDateTime,
@@ -232,6 +233,19 @@ export default function AgentDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* 症状复发：纵向视角，回答「同一问题是不是反复出现」 */}
+      <Card>
+        <CardHeader className="flex-row items-baseline justify-between space-y-0 border-b border-border/60 pb-2.5">
+          <CardTitle>症状复发</CardTitle>
+          <span className="text-[11px] text-muted-foreground/80">
+            同一失败家族按周追踪 · 触发率带分母，避免「没出现=已修好」的误判
+          </span>
+        </CardHeader>
+        <CardContent className="pt-3">
+          <SymptomRecurrence agentName={profile.name} />
+        </CardContent>
+      </Card>
 
       {/* 运行异常分析：过程链路级，与上方统计式问题列表互补 */}
       <Card>

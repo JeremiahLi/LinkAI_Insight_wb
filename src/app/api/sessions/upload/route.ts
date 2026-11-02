@@ -15,6 +15,16 @@ export async function POST(request: Request) {
     agentName?: string;
     /** 采集端上报的可读项目名；缺省时从 span 内容反推工作目录名 */
     projectName?: string;
+    /**
+     * Agent 版本：采集端读 `.pi/agent.json` 的 version。
+     * 注意它**不在 spans 里** —— upload.cjs 会把 session_start 消费掉并提升到 payload 顶层，
+     * 旧实现只从 spans 里找 session_start，所以这里永远拿不到（实测全库 session_start 0 条）。
+     */
+    agentVersion?: string | null;
+    /** 提示词指纹：同版本号但 prompt 改过时用于区分 */
+    promptHash?: string | null;
+    skillSetHash?: string | null;
+    configHash?: string | null;
     /** 父会话 id：跨进程父子链（采集端经环境变量链上报）；缺省/自环时为 null */
     parentSessionId?: string | null;
     startedAt?: string;
@@ -125,7 +135,23 @@ function toIntOr(v: unknown, fallback: number): number {
     return null; // 无法确定时不下发，避免把 startTime 覆盖成入库时间
   })();
   var agentId = (sessionStartSpan && sessionStartSpan.agent_id) || null;
-  var agentVersion = (sessionStartSpan && sessionStartSpan.agent_version) || '1.0.0';
+  /**
+   * 版本来源优先级：payload 顶层 > session_start span（旧采集端会把它塞进 spans）> null。
+   *
+   * 这里**不再回退 '1.0.0'**：那是个假值。旧实现把它写进 Agent.version 并在每次上传时覆盖，
+   * 实测把人工录入的 2.0.0 / 1.2.0 / 1.1.0 全冲回 1.0.0，等于「版本」这一维彻底失真。
+   * 拿不到就如实记 null（未上报），聚合时单独归为「未知版本」，不参与版本对比。
+   */
+  const reportedVersion = (() => {
+    const fromBody = typeof body.agentVersion === "string" ? body.agentVersion.trim() : "";
+    if (fromBody) return fromBody;
+    const fromSpan = sessionStartSpan ? String(sessionStartSpan.agent_version ?? "").trim() : "";
+    return fromSpan || null;
+  })();
+  const reportedPromptHash = (() => {
+    const v = typeof body.promptHash === "string" ? body.promptHash.trim() : "";
+    return v || null;
+  })();
 
   try {
     const { id: userIdDb } = await prisma.user.upsert({
@@ -137,7 +163,7 @@ function toIntOr(v: unknown, fallback: number): number {
     // Agent 归属：先按客户端给的 agent_id 命中（同一实例改名不新建记录），
     // 再按 name 命中，最后 create。旧实现用 upsert({ where: { name } }) 且 create 时带
     // 客户端 id，一旦真名分开而 id 相同就会主键冲突整包 500。
-    const agent = await resolveAgent(agentName, agentId, agentVersion);
+    const agent = await resolveAgent(agentName, agentId, reportedVersion);
 
     // 项目名只在「当前还是 hex / 等于 id」时才刷新，避免覆盖人工改名
     const existingProject = await prisma.project.findUnique({
@@ -156,10 +182,15 @@ function toIntOr(v: unknown, fallback: number): number {
     // 1. 先确保 session 存在（用最小的数据 insert，不覆盖统计字段）
     // parentSessionId：有值才覆盖，缺省不清空——旧格式 payload 不能抹掉已有链接
     const startFallback = resolvedStartMs != null ? { startTime: new Date(resolvedStartMs) } : {};
+    // 版本只在有上报时写入，缺省不清空（重传旧 payload 不能抹掉已知版本）
+    const versionPatch = {
+      ...(reportedVersion ? { agentVersion: reportedVersion } : {}),
+      ...(reportedPromptHash ? { promptHash: reportedPromptHash } : {}),
+    };
     await prisma.session.upsert({
       where: { id: sessionID },
       // startTime 修正：若 payload 带了 startedAt，或此前误用入库时间落库，则用正确基准刷新
-      update: { ...startFallback, ...(parentSessionId ? { parentSessionId } : {}) },
+      update: { ...startFallback, ...(parentSessionId ? { parentSessionId } : {}), ...versionPatch },
       create: {
         id: sessionID,
         projectId: projectIdDb,
@@ -167,6 +198,7 @@ function toIntOr(v: unknown, fallback: number): number {
         agentId: agent.id,
         status: "active",
         ...(parentSessionId ? { parentSessionId } : {}),
+        ...versionPatch,
         // 首次就能推出可读名时直接写入，避免历史脏归属
         title: deriveTitle(inSpans),
         startTime: new Date(resolvedStartMs ?? Date.now()),
@@ -435,22 +467,26 @@ async function resolveParentSpanId(
  * 实例名、但多个实例仍共用同一个 pi 安装 id 时，create 会主键冲突导致整包 500。
  * 这里把两种键分开匹配，冲突时降级为「按 name 复用 / 不指定 id 新建」。
  */
-async function resolveAgent(agentName: string, agentId: string | null, agentVersion: string) {
+async function resolveAgent(agentName: string, agentId: string | null, agentVersion: string | null) {
+  // 未上报版本时**不得修改** Agent.version：那是人工维护的展示值，
+  // 用「未知」去覆盖它会把 2.0.0 之类的真实版本冲成 1.0.0（历史 bug）
+  const versionPatch = agentVersion ? { version: agentVersion } : {};
+
   if (agentId) {
     const byId = await prisma.agent.findUnique({ where: { id: agentId } });
     if (byId) {
-      if (byId.name === agentName && byId.version === agentVersion) return byId;
+      if (byId.name === agentName && (!agentVersion || byId.version === agentVersion)) return byId;
       // 改名可能撞上别的记录的 unique 约束，失败则保留原记录
       return prisma.agent
-        .update({ where: { id: byId.id }, data: { name: agentName, version: agentVersion } })
+        .update({ where: { id: byId.id }, data: { name: agentName, ...versionPatch } })
         .catch(() => byId);
     }
   }
 
   const byName = await prisma.agent.findUnique({ where: { name: agentName } });
   if (byName) {
-    if (byName.version === agentVersion) return byName;
-    return prisma.agent.update({ where: { id: byName.id }, data: { version: agentVersion } });
+    if (!agentVersion || byName.version === agentVersion) return byName;
+    return prisma.agent.update({ where: { id: byName.id }, data: versionPatch });
   }
 
   const create = (id?: string) =>
@@ -458,7 +494,7 @@ async function resolveAgent(agentName: string, agentId: string | null, agentVers
       data: {
         ...(id ? { id } : {}),
         name: agentName,
-        version: agentVersion,
+        version: agentVersion ?? "1.0.0",
         emoji: "🤖",
         description: "",
         framework: FALLBACK_AGENT_NAME,

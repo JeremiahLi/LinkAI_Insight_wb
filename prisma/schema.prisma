@@ -87,6 +87,12 @@ model Session {
   /// 生成本会话的父会话工具调用 span id：时间窗覆盖本会话 startTime 的 kind ∈ ('tool_call','command') Span。
   /// 无外键；由 upload route 服务端时间窗匹配填充（fill-if-empty），不回填历史。
   parentSpanId     String?
+  /// 会话运行时的 Agent 版本（采集端 .pi/agent.json 的 version，经 upload.cjs 提升为 payload 顶层 agentVersion）。
+  /// null 表示**未上报**，与 '1.0.0' 有本质区别：旧实现把所有缺失都写成 '1.0.0'，
+  /// 导致「版本」这一维全是假数据（实测 149 个历史采集文件里只有 1 个带版本）。
+  agentVersion     String?
+  /// 提示词指纹：用于区分「同一版本号但 prompt 改过」的会话，采集端未上报时为 null
+  promptHash       String?
   rawData          String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
