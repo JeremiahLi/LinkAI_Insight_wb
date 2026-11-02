@@ -12,6 +12,7 @@ import { MultiLineTrendChart } from "@/components/charts/multi-line-trend-chart"
 import { StackedBarTrendChart } from "@/components/charts/stacked-bar-trend-chart";
 import { HealthPanel } from "@/components/agent/health-panel";
 import { AgentIssueList } from "@/components/agent/agent-issue-list";
+import { FailureAnalysisPanel } from "@/components/agent/failure-analysis-panel";
 import { TopList } from "@/components/agent/top-list";
 import {
   formatDateTime,
@@ -231,6 +232,19 @@ export default function AgentDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* 运行异常分析：过程链路级，与上方统计式问题列表互补 */}
+      <Card>
+        <CardHeader className="flex-row items-baseline justify-between space-y-0 border-b border-border/60 pb-2.5">
+          <CardTitle>运行异常分析</CardTitle>
+          <span className="text-[11px] text-muted-foreground/80">
+            失败 → 重试 → 结局 · 已排除重试自愈与用户中止
+          </span>
+        </CardHeader>
+        <CardContent className="pt-3">
+          <FailureAnalysisPanel agentName={profile.name} range={range} />
+        </CardContent>
+      </Card>
 
       {/* 三张趋势 */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">

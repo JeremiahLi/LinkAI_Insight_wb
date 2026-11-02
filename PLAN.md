@@ -481,3 +481,33 @@ M1 结束时应停下来做一次判断：把 30 条 Finding 与实际修复记�
 
 **下一步**：B4 标注集（30 条）→ Diagnoser（8 类根因 + 证据）→ 接入 Agent 详情页。
 
+### 2026-11-02 · UI 接入（已完成）
+
+| 文件 | 职责 |
+|---|---|
+| `src/lib/engine/detect/agent-failures.ts` | IO + 聚合层：按 Agent 与时间窗拉 span、跑检测器、产出 DTO |
+| `src/app/api/agents/[name]/issues/route.ts` | `GET /api/agents/[name]/issues?range=30d` |
+| `src/components/agent/failure-analysis-panel.tsx` | 概览 + 类型排行（可展开根因与建议）+ 链路深链 |
+| `agent-board/[name]/page.tsx` | 在「问题列表」下方新增「运行异常分析」卡片 |
+
+**与既有「问题列表」的分工**（两处并存，不互相替代）：
+
+| | 问题列表 | 运行异常分析 |
+|---|---|---|
+| 粒度 | 统计聚合 | 过程链路 |
+| 回答 | 哪个工具在失败、失败率多高 | 这一次怎么失败、自愈没有、根因、怎么修 |
+| 数据源 | 阈值 + 聚类 | 失败链 + 签名 + 规则建议 |
+
+**实测**（26 个 Agent，近 30 天）
+
+```
+有会话的 Agent：14 / 26
+有待处理异常的 Agent：4（pptagent1022 4 条、pptagenttrae 2 条、PPTAgent相关资料 1、jailhouse 1）
+pi-coding-agent：30 天 65 个会话，仅 1 条待处理
+```
+
+API 响应 4~45ms（纯 SQL + 规则，无 LLM 调用），不构成页面负担。
+
+**未完成的验证**：本机 3002 端口被另一项目（`AgentOps-Cursor`）占用，改用 3010 启动；无头浏览器被环境安全策略终止，**未做视觉验证**。已验证的是：TypeScript strict 通过、页面 200、客户端组件成功挂载并发起请求（dev 日志有 `/api/agents/agentcodebuddy/issues?range=30d` 200）、DTO 结构正确。样式与布局需人工打开页面确认。
+
+
