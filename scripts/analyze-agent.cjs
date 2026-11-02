@@ -11,6 +11,7 @@
 const { PrismaClient } = require("@prisma/client");
 const { extractFailureChains } = require("../.tmp-verify/failure-chain.js");
 const { suggestRemediation, isActionable } = require("../.tmp-verify/remediation.js");
+const { buildCommandStats } = require("../.tmp-verify/command-stats.js");
 
 const prisma = new PrismaClient();
 
@@ -59,7 +60,18 @@ function pad(s, n) {
   const spans = await prisma.span.findMany({
     where: { sessionId: { in: ids }, kind: { in: ["tool_call", "command", "answer"] } },
     orderBy: [{ sessionId: "asc" }, { roundIndex: "asc" }, { turnId: "asc" }],
-    select: { id: true, sessionId: true, roundIndex: true, kind: true, name: true, status: true, error: true, output: true },
+    select: {
+      id: true,
+      sessionId: true,
+      roundIndex: true,
+      kind: true,
+      name: true,
+      status: true,
+      error: true,
+      output: true,
+      input: true,
+      duration: true,
+    },
   });
 
   const bySession = new Map();
@@ -108,6 +120,32 @@ function pad(s, n) {
     for (const [f, v] of famSorted) {
       console.log(`  ${pad(v.count + " 条", 7)} ${pad(v.sessions.size + " 会话", 9)} ${f.slice(0, 60)}`);
       console.log(`          ${v.sample.slice(0, 100)}`);
+    }
+  }
+
+  console.log(`\n--- 接口级成败对照（哪个接口失败、失败几次、成败入参差在哪）---`);
+  const cmdStats = buildCommandStats(spans, Number(process.env.CMD_LIMIT ?? 10));
+  if (cmdStats.length === 0) {
+    console.log("  无");
+  } else {
+    for (const c of cmdStats) {
+      const d = c.argDiff;
+      console.log(
+        `\n  ${pad(c.label, 30)} 调用 ${pad(c.calls, 4)} 失败 ${pad(c.failures, 4)} ${pad(c.failRate.toFixed(0) + "%", 5)} p50 ${c.p50DurationMs}ms`,
+      );
+      if (!d) {
+        console.log("     该接口从未成功过，没有可对照的成功样本");
+        continue;
+      }
+      if (d.identicalCommand) {
+        console.log(
+          `     入参与成功样本完全一致${d.sameSession ? "（同任务重试）" : ""} → 问题不在入参，在输入数据或环境状态`,
+        );
+      } else {
+        if (d.onlySuccess.length) console.log(`     成功多出  ${d.onlySuccess.slice(0, 5).join(" ").slice(0, 120)}`);
+        if (d.onlyFailed.length) console.log(`     仅失败有  ${d.onlyFailed.slice(0, 5).join(" ").slice(0, 120)}`);
+        if (!d.sameSession) console.log("     （对照样本来自不同任务，差异仅供参考）");
+      }
     }
   }
 

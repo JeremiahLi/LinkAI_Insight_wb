@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start -p 3002",
     "seed": "node prisma/seed.js",
-    "detect:build": "node ./node_modules/typescript/bin/tsc src/lib/engine/detect/error-signature.ts src/lib/engine/detect/failure-chain.ts src/lib/engine/detect/remediation.ts --outDir .tmp-verify --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop --strict",
+    "detect:build": "node ./node_modules/typescript/bin/tsc src/lib/engine/detect/error-signature.ts src/lib/engine/detect/failure-chain.ts src/lib/engine/detect/remediation.ts src/lib/engine/detect/command-stats.ts --outDir .tmp-verify --module commonjs --target es2020 --moduleResolution node --skipLibCheck --esModuleInterop --strict",
     "detect:analyze": "node scripts/analyze-agent.cjs"
   },
   "dependencies": {

@@ -14,6 +14,7 @@ import { prisma } from "@/lib/prisma";
 import { extractFailureChains, type ChainOutcome, type ChainSpanInput, type FailureChain } from "./failure-chain";
 import { signatureOf, type ErrorSignatureKind } from "./error-signature";
 import { suggestRemediation, isActionable, type Remediation } from "./remediation";
+import { buildCommandStats, type CommandStat } from "./command-stats";
 
 export type FailureSeverity = "critical" | "warning" | "info";
 
@@ -65,6 +66,11 @@ export interface AgentFailureReport {
   families: FailureFamilyDTO[];
   /** 仅含待处理链（已排除重试自愈、用户中止、日志误写） */
   chains: FailureChainDTO[];
+  /**
+   * 命令级聚合：哪个具体命令失败多少次、失败与成功时的参数差在哪。
+   * 对应「bash 失败 12 次」无法行动的问题 —— bash 是容器，命令才是单位。
+   */
+  commands: CommandStat[];
   dataNotes: string[];
 }
 
@@ -114,6 +120,7 @@ export async function getAgentFailureReport(
       byKind: [],
       families: [],
       chains: [],
+      commands: [],
       dataNotes: ["该时间段内没有会话记录"],
     };
   }
@@ -134,6 +141,8 @@ export async function getAgentFailureReport(
       status: true,
       error: true,
       output: true,
+      input: true,
+      duration: true,
     },
   });
 
@@ -272,6 +281,7 @@ export async function getAgentFailureReport(
       .sort((a, b) => b.count - a.count),
     families,
     chains,
+    commands: buildCommandStats(spans, 20),
     dataNotes,
   };
 }
