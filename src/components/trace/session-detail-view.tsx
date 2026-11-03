@@ -54,6 +54,9 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
   const [reloadToken, setReloadToken] = useState(0);
   // 会话父子链面板（SlidePanel）
   const [treeOpen, setTreeOpen] = useState(false);
+  // 三栏宽度（px）：左树固定、右详情固定、中间列吃剩余空间——拖分隔条即改中间列宽
+  const [leftW, setLeftW] = useState(272);
+  const [rightW, setRightW] = useState(352);
   /** 深链要定位的 span：与 selectedSpanId 分开，避免用户点树时甘特反复重新聚焦 */
   const [focusSpanId, setFocusSpanId] = useState<string | null>(null);
   // ?spanId= 只应用一次：之后用户手动点的选中项不能被刷新/重算覆盖
@@ -417,10 +420,13 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
         </div>
       </header>
 
-      {/* 主体：三栏布局 */}
+      {/* 主体：三栏布局（左/右列可拖分隔条动态放缩，中间列自动吃剩余宽度） */}
       <div className="flex flex-1 overflow-hidden">
         {/* 左：Span 层级树 */}
-        <aside className="flex w-64 shrink-0 flex-col overflow-hidden border-r border-border bg-card xl:w-72">
+        <aside
+          className="flex shrink-0 flex-col overflow-hidden bg-card"
+          style={{ width: leftW }}
+        >
           <div className="z-10 border-b border-border bg-card px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
             Span Hierarchy
           </div>
@@ -434,8 +440,17 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
           </div>
         </aside>
 
+        <ColResizer
+          value={leftW}
+          onChange={setLeftW}
+          min={176}
+          max={520}
+          defaultValue={272}
+          side="start"
+        />
+
         {/* 中：Timeline / Transcript */}
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <main className="flex min-w-[320px] flex-1 flex-col overflow-hidden">
           {view === "timeline" ? (
             <TraceTimeline
               spans={spans}
@@ -463,8 +478,20 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
           )}
         </main>
 
+        <ColResizer
+          value={rightW}
+          onChange={setRightW}
+          min={288}
+          max={720}
+          defaultValue={352}
+          side="end"
+        />
+
         {/* 右：Span 详情 */}
-        <aside className="w-[340px] shrink-0 overflow-y-auto scrollbar-thin border-l border-border bg-card xl:w-96">
+        <aside
+          className="shrink-0 overflow-y-auto scrollbar-thin bg-card"
+          style={{ width: rightW }}
+        >
           <div className="sticky top-0 z-10 border-b border-border bg-card p-3">
             <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
               {selectedCall ? "Token 构成明细" : "Span 详情"}
@@ -506,6 +533,72 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
           <SessionTreePanel sessionId={detail.id} />
         </div>
       </SlidePanel>
+    </div>
+  );
+}
+
+/**
+ * 列宽拖拽把手。
+ *
+ * side="start"：被调列在分隔线左侧（向右拖变宽）；side="end"：在右侧（向左拖变宽）。
+ * 命中区左右各外扩 6px，视觉上仍是一条 1px 细线，避免为了好点而牺牲布局精度。
+ */
+function ColResizer({
+  value,
+  onChange,
+  min,
+  max,
+  defaultValue,
+  side,
+}: {
+  value: number;
+  onChange: (w: number) => void;
+  min: number;
+  max: number;
+  defaultValue: number;
+  side: "start" | "end";
+}) {
+  const startRef = useRef<{ x: number; w: number } | null>(null);
+  const [active, setActive] = useState(false);
+
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-valuenow={value}
+      title="拖动调整列宽 · 双击复位"
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        startRef.current = { x: e.clientX, w: value };
+        setActive(true);
+        (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+        document.body.style.userSelect = "none";
+      }}
+      onPointerMove={(e) => {
+        const s = startRef.current;
+        if (!s) return;
+        const dx = e.clientX - s.x;
+        onChange(Math.min(Math.max(side === "start" ? s.w + dx : s.w - dx, min), max));
+      }}
+      onPointerUp={(e) => {
+        if (!startRef.current) return;
+        startRef.current = null;
+        setActive(false);
+        (e.currentTarget as HTMLElement).releasePointerCapture?.(e.pointerId);
+        document.body.style.userSelect = "";
+      }}
+      onDoubleClick={() => onChange(defaultValue)}
+      className="group relative w-1.5 shrink-0 cursor-col-resize touch-none bg-transparent"
+    >
+      <div
+        className={cn(
+          "absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors",
+          active ? "bg-primary" : "bg-border group-hover:bg-primary/60",
+        )}
+      />
+      {/* 外扩命中区：只有它需要响应指针事件 */}
+      <div className="absolute inset-y-0 -left-1.5 -right-1.5" />
     </div>
   );
 }

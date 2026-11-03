@@ -53,6 +53,8 @@ export function TraceTimeline({
   const gEff = ganttDomain ?? { start: 0, end: totalSeconds };
   const ganttDomainRef = useRef(gEff);
   ganttDomainRef.current = gEff;
+  const chartDomainRef = useRef<Domain | null>(chartDomain);
+  chartDomainRef.current = chartDomain;
   const axisTrackRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -78,28 +80,26 @@ export function TraceTimeline({
     });
   }, [revealSpanId, spans, groups, totalSeconds]);
 
-  // 滚轮缩放：甘特图内 → 缩放甘特时间轴；下方两张柱状图内 → 缩放图表域（两图共用）；
-  // 其余位置（中间列空白处等）→ 不拦截，交给浏览器原生上下滚动。
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const handler = (e: WheelEvent) => {
-      const target = e.target as HTMLElement | null;
-      const scope = target?.closest?.("[data-zoom-scope]")?.getAttribute("data-zoom-scope");
-      if (scope !== "gantt" && scope !== "charts") return; // 原生滚动，不拦截
-      e.preventDefault();
-      const wantCharts = scope === "charts";
-      const d = wantCharts ? (chartDomain ?? { start: 0, end: totalSeconds }) : ganttDomainRef.current;
+  /**
+   * 缩放一个域：以光标在轨道内的水平位置为锚点等比放大/缩小。
+   * scope = "gantt" 只动甘特；"charts" 只动下方两张图（两图共用一个域，天然联动）。
+   */
+  const zoomDomain = useCallback(
+    (scope: "gantt" | "charts", track: HTMLElement | null, clientX: number, deltaY: number) => {
+      const d =
+        scope === "charts"
+          ? (chartDomainRef.current ?? { start: 0, end: totalSeconds })
+          : ganttDomainRef.current;
       const span0 = Math.max(d.end - d.start, 0.001);
-      const factor = Math.exp(e.deltaY * 0.0012); // 向下滚 = 缩小（zoom out）
+      const factor = Math.exp(deltaY * 0.0015); // 下滚 = 缩小，上滚 = 放大
       const minSpan = Math.max(totalSeconds / 2000, 0.05);
       const newSpan = Math.min(Math.max(span0 * factor, minSpan), totalSeconds);
-      // 锚点：光标在当前缩放轨道（data-zoom-track）内的水平位置
-      const track = target?.closest?.("[data-zoom-track]") as HTMLElement | null;
+      if (Math.abs(newSpan - span0) < 1e-9) return;
+
       const rect = track?.getBoundingClientRect();
       let frac = 0.5;
       if (rect && rect.width > 0) {
-        frac = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
+        frac = Math.min(Math.max((clientX - rect.left) / rect.width, 0), 1);
       }
       const anchor = d.start + frac * span0;
       let ns = anchor - (anchor - d.start) * (newSpan / span0);
@@ -113,12 +113,128 @@ export function TraceTimeline({
         ns = Math.max(ns - shift, 0);
         ne = totalSeconds;
       }
-      if (wantCharts) setChartDomain({ start: ns, end: ne });
-      else setGanttDomain({ start: ns, end: ne });
+      const next = { start: ns, end: ne };
+      if (scope === "charts") {
+        chartDomainRef.current = next;
+        setChartDomain(next);
+      } else {
+        ganttDomainRef.current = next;
+        setGanttDomain(next);
+      }
+    },
+    [totalSeconds],
+  );
+
+  /**
+   * Ctrl/⌘ + 滚轮缩放；不按修饰键时一律不拦截，交给容器原生上下滚动
+   * （甘特图区域也一样——否则鼠标停在甘特上就滚不动中间列）。
+   * 浏览器自身的 Ctrl+滚轮页面缩放由 preventDefault 拦下。
+   */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      const target = e.target as HTMLElement | null;
+      const scope = target?.closest?.("[data-plot]")?.getAttribute("data-plot");
+      if (scope !== "gantt" && scope !== "charts") return;
+      e.preventDefault();
+      // deltaMode: 0=像素 1=行 2=页，统一折算成像素，避免不同设备缩放速度差异过大
+      const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1);
+      if (scope === "gantt") {
+        // 甘特所有绘图区与刻度轨同宽，锚点统一取刻度轨的矩形
+        zoomDomain("gantt", axisTrackRef.current, e.clientX, dy);
+      } else {
+        zoomDomain("charts", target?.closest("[data-zoom-track]") as HTMLElement | null, e.clientX, dy);
+      }
     };
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
-  }, [totalSeconds, chartDomain]);
+  }, [zoomDomain]);
+
+  /** 拖动平移：把绘图区上的水平位移换算成时间位移，向域内平移（仅已缩放时有意义） */
+  const dragRef = useRef<{
+    scope: "gantt" | "charts";
+    startX: number;
+    startDomain: Domain;
+    width: number;
+    moved: boolean;
+  } | null>(null);
+  /** 刚完成拖动后紧跟着的那次 click 要吞掉，否则松手会误选中某根 span/柱体 */
+  const didPanRef = useRef(false);
+
+  const onPanMove = useCallback(
+    (ev: PointerEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const dx = ev.clientX - d.startX;
+      if (!d.moved && Math.abs(dx) < 3) return; // 阈值内的抖动仍视为点击
+      if (!d.moved) {
+        d.moved = true;
+        didPanRef.current = true;
+        document.body.style.userSelect = "none";
+        document.body.style.cursor = "grabbing";
+      }
+      const span0 = Math.max(d.startDomain.end - d.startDomain.start, 0.001);
+      if (span0 >= totalSeconds - 1e-6) return; // 全量域无法平移
+      const raw = d.startDomain.start - (dx / d.width) * span0;
+      const ns = Math.min(Math.max(raw, 0), Math.max(totalSeconds - span0, 0));
+      const next = { start: ns, end: ns + span0 };
+      if (d.scope === "charts") {
+        chartDomainRef.current = next;
+        setChartDomain(next);
+      } else {
+        ganttDomainRef.current = next;
+        setGanttDomain(next);
+      }
+    },
+    [totalSeconds],
+  );
+
+  const onPanUp = useCallback(() => {
+    dragRef.current = null;
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+    window.removeEventListener("pointermove", onPanMove);
+    window.removeEventListener("pointerup", onPanUp);
+    // 浏览器在 pointerup 之后才派发 click，用宏任务把标记清掉
+    window.setTimeout(() => {
+      didPanRef.current = false;
+    }, 0);
+  }, [onPanMove]);
+
+  const onPanDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement | null;
+      const plot = target?.closest?.("[data-plot]") as HTMLElement | null;
+      if (!plot) return;
+      const scope = plot.getAttribute("data-plot");
+      if (scope !== "gantt" && scope !== "charts") return;
+      const d =
+        scope === "charts"
+          ? (chartDomainRef.current ?? { start: 0, end: totalSeconds })
+          : ganttDomainRef.current;
+      if (d.end - d.start >= totalSeconds - 1e-6) return; // 未缩放，无需平移
+      const rect = plot.getBoundingClientRect();
+      dragRef.current = {
+        scope,
+        startX: e.clientX,
+        startDomain: { start: d.start, end: d.end },
+        width: Math.max(rect.width, 1),
+        moved: false,
+      };
+      window.addEventListener("pointermove", onPanMove);
+      window.addEventListener("pointerup", onPanUp);
+    },
+    [onPanMove, onPanUp, totalSeconds],
+  );
+
+  // 卸载时清掉可能残留的全局监听
+  useEffect(() => () => {
+    window.removeEventListener("pointermove", onPanMove);
+    window.removeEventListener("pointerup", onPanUp);
+  }, [onPanMove, onPanUp]);
 
   const spanSec = gEff.end - gEff.start;
   const px = useCallback(
@@ -159,20 +275,33 @@ export function TraceTimeline({
     <div
       ref={scrollRef}
       onDoubleClick={handleDoubleClick}
+      onPointerDown={onPanDown}
+      onClickCapture={(e) => {
+        // 拖动平移结束后的那次 click 不算点选
+        if (!didPanRef.current) return;
+        e.stopPropagation();
+        e.preventDefault();
+        didPanRef.current = false;
+      }}
       className="flex-1 overflow-auto scrollbar-thin"
-      title="甘特图内滚轮缩放时间轴 · 柱状图内滚轮缩放图表 · 空白处滚轮上下滚动 · 双击复位 · 点击柱体查看构成 · 选中块后 ←/→ 逐块跳转"
+      title="Ctrl+滚轮在甘特图内缩放时间轴 · Ctrl+滚轮在柱状图内联动缩放两图 · 缩放后按住左键左右拖动平移 · 双击复位 · 点击柱体查看构成 · 选中块后 ←/→ 逐块跳转"
     >
       <div className="relative min-w-[860px] p-4 pb-3 pr-10">
         {/* 时间轴（甘特图专用缩放域） */}
         <div data-zoom-scope="gantt" className="mb-1.5 flex items-center text-[11px] text-muted-foreground">
           <div className={cn(LABEL_W, "shrink-0 pr-3 text-right")}>
             {ganttDomain ? (
-              <span className="text-[var(--trace-llm)]">已缩放 · 双击复位</span>
+              <span className="text-[var(--trace-llm)]">已缩放 · 拖动平移 · 双击复位</span>
             ) : (
               <span className="text-[10px]">已剔除轮间空闲</span>
             )}
           </div>
-          <div ref={axisTrackRef} data-zoom-track="1" className="flex flex-1">
+          <div
+            ref={axisTrackRef}
+            data-zoom-track="1"
+            data-plot="gantt"
+            className={cn("flex flex-1 select-none", ganttDomain && "cursor-grab")}
+          >
             {ticks.map((t, i) => (
               <div key={i} className={cn("flex-1 pr-1", i === ticks.length - 1 && "text-right")}>
                 {fmtTick(t)}
@@ -223,7 +352,13 @@ export function TraceTimeline({
                     {group.title}
                   </span>
                 </div>
-                <div className="relative h-full flex-1 overflow-hidden">
+                <div
+                  data-plot="gantt"
+                  className={cn(
+                    "relative h-full flex-1 overflow-hidden",
+                    ganttDomain && "cursor-grab",
+                  )}
+                >
                   <div
                     className="absolute top-[5px] h-[18px] rounded-sm bg-[var(--trace-agent)] opacity-40 transition-[filter] hover:brightness-125"
                     style={{
@@ -265,7 +400,13 @@ export function TraceTimeline({
                       )}
                     </span>
                   </div>
-                  <div className="relative h-full flex-1 overflow-hidden">
+                  <div
+                    data-plot="gantt"
+                    className={cn(
+                      "relative h-full flex-1 overflow-hidden",
+                      ganttDomain && "cursor-grab",
+                    )}
+                  >
                     {row.spans.map((s) => {
                       const left = px(s.relStart);
                       const width = Math.max(
@@ -690,7 +831,11 @@ function TokenCharts({
             <span className="hidden sm:inline">点击柱体看明细</span>
           </div>
         </div>
-        <div className="relative" data-zoom-track="1">
+        <div
+          className={cn("relative", zoomed && "cursor-grab")}
+          data-zoom-track="1"
+          data-plot="charts"
+        >
           <canvas
             ref={lineRef}
             className="block cursor-pointer"
@@ -725,7 +870,11 @@ function TokenCharts({
             {legendSwatch("--call-other", "未归因", "新增里无法归到具体来源的部分：没命中缓存被重算的旧上下文，或采集端截断的系统提示/工具定义")}
           </div>
         </div>
-        <div className="relative" data-zoom-track="1">
+        <div
+          className={cn("relative", zoomed && "cursor-grab")}
+          data-zoom-track="1"
+          data-plot="charts"
+        >
           <canvas
             ref={barRef}
             className="block cursor-pointer"
