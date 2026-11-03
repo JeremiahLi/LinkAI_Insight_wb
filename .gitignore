@@ -57,3 +57,10 @@ scripts/offline-server-pkg-win64/
 
 # 检测模块的 CommonJS 编译产物（npm run detect:build 生成，供 scripts/*.cjs 使用）
 .tmp-verify/
+
+# Prisma 本地数据库不入库，原因有两个：
+# 1. 体积 44MB，每次提交都是整块 blob，仓库会被撑爆；
+# 2. UserSettings.settingsJson 里存着模型 API key，GitHub 的密钥扫描会直接拒绝推送。
+# 新克隆后执行 npm run db:reset（db push + seed）重建。
+prisma/dev.db
+prisma/*.db
