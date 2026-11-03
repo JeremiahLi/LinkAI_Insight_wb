@@ -598,3 +598,36 @@ npm run detect:build
 node scripts/diagnose-cli.cjs          # 或带 --api-key/--base-url/--model
 ```
 
+### 2026-11-02 晚 · B 第一步跑批结果（21/23，待人工标注）
+
+模型换成讯飞 `spark-x2.6-4b`（原 deepseek 余额不足）。跑批耗时约 40 分钟，产出的报告在 `.tmp-verify/diagnosis-report-2026-11-02.md`。
+
+**结果分布（21 条有效）**
+
+| 根因 | 条数 | 占比 |
+|---|---|---|
+| `tool_arg_error` 入参构造错 | 14 | 67% |
+| `prompt_ambiguity` 指令不清 | 3 | 14% |
+| `tool_env_error` 环境/依赖 | 2 | 10% |
+| `hallucination` 编造事实 | 2 | 10% |
+
+**2 条模型跑不通**（agentcodebuddy 的 2 次 `shell`，错误形态 `unknown`）：180s/420s 均超时，600s 时退化为 `fetch failed`（网关断连），降级裁剪证据后仍未成功。报告里单列并注明「不计入标注，但也不等于没有根因」。
+
+**工程上补的三件事（都是跑批逼出来的）**
+
+1. **诊断缓存**（`diagnosis-cache.json`，键为 `模型::spanId`）：第一轮 13 条超时白烧了 13 次请求。现在每条成功即落盘，重跑只补缺的。失败也缓存（`{__error}`），否则重跑会再等十几分钟。
+2. **超时降级重试**：`diagnose()` 捕获超时后用砍半的证据再试一次，成功则 `degraded: true` 并在报告标注。理由：超时是"证据太长、解码慢"，原样重试必然再超时。
+3. **key 放 `.env` 而不是 `dev.db`**：`prisma/dev.db` 被 git 跟踪，key 写进去会随提交进 GitHub 历史。CLI 加了无依赖的 `.env` 加载。
+
+**跑批暴露的真问题：8 类枚举缺一格**
+
+21 条里有 7 条（#1 #3 #11 #12 #14 #18 #21 #22）本质是**同一个故障模式：模型生成的产物不满足下游 schema**（deck.json 的字段名 `type` vs `slide_type`、TOC 超 6 项、标题超长、JSON 引号不合法）。但模型把它们拆成了四种根因：
+
+- `tool_arg_error`（#1 #12 #14 #21 #22）
+- `prompt_ambiguity`（#3 #18）
+- `hallucination`（#11 #15）
+- 漏掉的 `context_missing`（#18 的真实情况更像是"没读 ppt_dsl.py 里的 pydantic 约束就生成"）
+
+**这不是模型能力问题，是分类体系问题**：`prompt_ambiguity` 正在充当"模型违反了写在代码里的约束、但用户没在 prompt 里重复一遍"的出口——把责任推给用户。真正该有的是 `schema_violation`（产物契约不匹配）这一类。
+
+**若准确率上不去，第一优先级不是换模型，是改枚举**：合并/新增 schema 冲突类，并把 `prompt_ambiguity` 的判定条件收紧为「轨迹里有澄清/猜目标的证据」，而不是「用户没写清楚」。
