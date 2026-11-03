@@ -80,6 +80,55 @@ export function useCategoryPalette(): string[] {
   return isDark ? DARK_PALETTE : LIGHT_PALETTE;
 }
 
+function hexToHsl(hex: string): [number, number, number] {
+  const m = hex.replace("#", "");
+  const r = parseInt(m.slice(0, 2), 16) / 255;
+  const g = parseInt(m.slice(2, 4), 16) / 255;
+  const b = parseInt(m.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h: number;
+  if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  return [h * 60, s, l];
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = (((h % 360) + 360) % 360) / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let rgb: [number, number, number];
+  if (hp < 1) rgb = [c, x, 0];
+  else if (hp < 2) rgb = [x, c, 0];
+  else if (hp < 3) rgb = [0, c, x];
+  else if (hp < 4) rgb = [0, x, c];
+  else if (hp < 5) rgb = [x, 0, c];
+  else rgb = [c, 0, x];
+  const offset = l - c / 2;
+  const to = (v: number) =>
+    Math.round((v + offset) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${to(rgb[0])}${to(rgb[1])}${to(rgb[2])}`;
+}
+
+/**
+ * 把 hex 颜色降饱和（saturation 乘以 keep），色相与明度不变。
+ * 用于把默认分类色板（Tailwind 500 系）压柔一点，适合大面积柱形填充；
+ * 只改饱和度，保证同一实体跨图仍然同色、图例可辨识。
+ */
+export function softenColor(hex: string, keep = 0.7): string {
+  if (!hex.startsWith("#") || hex.length !== 7) return hex;
+  const [h, s, l] = hexToHsl(hex);
+  if (s === 0) return hex;
+  return hslToHex(h, s * keep, l);
+}
+
 /**
  * 指标身份色：颜色用来标识「这是哪个指标卡」，而不是「这是卡里哪条序列」。
  * 卡内多序列用同色族梯度 / 线型 / 语义红区分，跨卡不再撞色。

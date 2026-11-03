@@ -27,8 +27,11 @@ export function FancyBarChartH({
   yAxisInterval,
   xInteger,
   yAxisWidth = 160,
+  activeKey = null,
+  onActiveKeyChange,
+  onBarClick,
 }: {
-  data: { name: string; value: number; color?: string }[];
+  data: { name: string; value: number; color?: string; key?: string }[];
   valueFormatter: (v: number) => string;
   ariaLabel?: string;
   /**
@@ -48,9 +51,20 @@ export function FancyBarChartH({
    * 需要调用方放大并按需截断类目名。
    */
   yAxisWidth?: number;
+  /**
+   * 当前高亮条目的稳定键（匹配 datum.key，缺省用 name）。
+   * 传入后：命中的柱子全亮，其余柱子压暗——用于两张图同名柱联动高亮。
+   */
+  activeKey?: string | null;
+  /** 悬停/移出某根柱子时回调（传稳定键），供调用方做跨图联动 */
+  onActiveKeyChange?: (key: string | null) => void;
+  /** 点击柱子回调（传稳定键），供调用方跳转详情页 */
+  onBarClick?: (key: string) => void;
 }) {
   const colors = useChartColors();
   const palette = useCategoryPalette();
+
+  const keyOf = (d: { key?: string; name: string }) => d.key ?? d.name;
 
   return (
     <ResponsiveContainer width="100%" height="100%">
@@ -88,10 +102,25 @@ export function FancyBarChartH({
           radius={[0, 3, 3, 0]}
           barSize={14}
           fillOpacity={0.85}
+          style={{ cursor: onBarClick ? "pointer" : undefined }}
+          onMouseEnter={(entry: { payload?: { key?: string; name?: string } }) =>
+            entry.payload && onActiveKeyChange?.(keyOf({ name: "", ...entry.payload }))
+          }
+          onMouseLeave={() => onActiveKeyChange?.(null)}
+          onClick={(entry: { payload?: { key?: string; name?: string } }) =>
+            entry.payload && onBarClick?.(keyOf({ name: "", ...entry.payload }))
+          }
         >
-          {data.map((d, i) => (
-            <Cell key={`${d.name}-${i}`} fill={d.color ?? palette[i % palette.length]} />
-          ))}
+          {data.map((d, i) => {
+            const dimmed = activeKey != null && keyOf(d) !== activeKey;
+            return (
+              <Cell
+                key={`${keyOf(d)}-${i}`}
+                fill={d.color ?? palette[i % palette.length]}
+                fillOpacity={activeKey == null ? 0.85 : dimmed ? 0.25 : 1}
+              />
+            );
+          })}
           <LabelList
             dataKey="value"
             position="right"

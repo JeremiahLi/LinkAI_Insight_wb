@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader, SegmentedControl } from "@/components/shell/page-header";
 import { KpiCard } from "@/components/shell/kpi-card";
 import { FancyBarChartH } from "@/components/charts/fancy-bar-chart-h";
 import { MultiLineTrendChart } from "@/components/charts/multi-line-trend-chart";
 import { AgentCompareTable } from "@/components/agent/agent-compare-table";
-import { useCategoryPalette } from "@/lib/use-chart-colors";
+import { useCategoryPalette, softenColor } from "@/lib/use-chart-colors";
 import { formatDuration, formatNumber, formatTokens, pctChange } from "@/lib/format";
 import { RANGE_OPTIONS, type StatsRange } from "@/lib/engine/stats/range";
 import { HEALTH_WINDOW_DAYS } from "@/lib/engine/stats/health";
@@ -43,6 +44,7 @@ interface TrendData {
 }
 
 export default function AgentBoardPage() {
+  const router = useRouter();
   const [range, setRange] = useState<StatsRange>("30d");
   const [metric, setMetric] = useState<AgentTrendMetric>("sessions");
   const [granularity, setGranularity] = useState<Granularity>("day");
@@ -50,10 +52,15 @@ export default function AgentBoardPage() {
   const [loading, setLoading] = useState(true);
   const [trend, setTrend] = useState<TrendData>({ labels: [], series: [] });
   const [trendLoading, setTrendLoading] = useState(false);
+  // 两张对比图联动高亮：hover 某根柱子时，另一张图里同名 Agent 的柱子同时点亮
+  const [activeAgent, setActiveAgent] = useState<string | null>(null);
   const palette = useCategoryPalette();
+  // 默认分类色板（Tailwind 500 系）大面积填充柱形时偏扎眼，统一降饱和压柔
+  const softPalette = useMemo(() => palette.map((c) => softenColor(c, 0.7)), [palette]);
 
   useEffect(() => {
     let cancelled = false;
+    setActiveAgent(null);
     setLoading(true);
     fetch(`/api/dashboard/agents/board?range=${range}`)
       .then((r) => r.json())
@@ -107,13 +114,14 @@ export default function AgentBoardPage() {
   const agentColor = new Map<string, string>();
   [...data.agents]
     .sort((a, b) => a.name.localeCompare(b.name))
-    .forEach((a, i) => agentColor.set(a.name, palette[i % palette.length]));
+    .forEach((a, i) => agentColor.set(a.name, softPalette[i % softPalette.length]));
   // 用截断前的原始 name 查色；截断后的 label 只用于显示
-  const colorOf = (name: string) => agentColor.get(name) ?? palette[0];
+  const colorOf = (name: string) => agentColor.get(name) ?? softPalette[0];
   // 会话数对比：0 会话的 Agent 不画（空柱子只是噪声），降序排名
+  // key 用截断前的原始 Agent 名（与详情页路由、另一张图匹配都用它）
   const sessionData = data.agents
     .filter((a) => a.sessions > 0)
-    .map((a) => ({ name: shortName(a.name), value: a.sessions, color: colorOf(a.name) }))
+    .map((a) => ({ name: shortName(a.name), value: a.sessions, color: colorOf(a.name), key: a.name }))
     .sort((a, b) => b.value - a.value);
   const failRateData = data.agents
     .filter((a) => a.toolCalls >= 5 && a.toolFailRate != null)
@@ -121,6 +129,7 @@ export default function AgentBoardPage() {
       name: shortName(a.name),
       value: Number(a.toolFailRate!.toFixed(2)),
       color: colorOf(a.name),
+      key: a.name,
     }))
     .sort((a, b) => b.value - a.value);
   // 两卡同一行，图表高度取两者行数较大者（对齐柱距便于横向对比），并封顶避免 20+ Agent 时卡片过高
@@ -176,7 +185,7 @@ export default function AgentBoardPage() {
           <CardHeader className="flex-row items-baseline justify-between space-y-0 border-b border-border/60 pb-2.5">
             <CardTitle>Agent 会话数</CardTitle>
             <span className="text-[11px] text-muted-foreground/80">
-              {data.range} · {sessionData.length} 个 Agent 有会话
+              {data.range} · {sessionData.length} 个 Agent 有会话 · 点击柱子进详情
             </span>
           </CardHeader>
           <CardContent className="pt-4" style={{ height: chartH }}>
@@ -191,6 +200,9 @@ export default function AgentBoardPage() {
                 ariaLabel="会话数"
                 yAxisInterval={0}
                 xInteger
+                activeKey={activeAgent}
+                onActiveKeyChange={setActiveAgent}
+                onBarClick={(name) => router.push(`/agent-board/${encodeURIComponent(name)}`)}
               />
             )}
           </CardContent>
@@ -200,7 +212,7 @@ export default function AgentBoardPage() {
           <CardHeader className="flex-row items-baseline justify-between space-y-0 border-b border-border/60 pb-2.5">
             <CardTitle>工具失败率</CardTitle>
             <span className="text-[11px] text-muted-foreground/80">
-              {formatNumber(toolFailedTotal)} / {formatNumber(toolCallsTotal)} 次失败
+              {formatNumber(toolFailedTotal)} / {formatNumber(toolCallsTotal)} 次失败 · 点击柱子进详情
             </span>
           </CardHeader>
           <CardContent className="pt-4" style={{ height: chartH }}>
@@ -214,6 +226,9 @@ export default function AgentBoardPage() {
                 valueFormatter={(v) => `${v.toFixed(1)}%`}
                 ariaLabel="工具失败率"
                 yAxisInterval={0}
+                activeKey={activeAgent}
+                onActiveKeyChange={setActiveAgent}
+                onBarClick={(name) => router.push(`/agent-board/${encodeURIComponent(name)}`)}
               />
             )}
           </CardContent>
