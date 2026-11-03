@@ -21,11 +21,82 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { PrismaClient } = require("@prisma/client");
-const { extractFailureChains } = require("../.tmp-verify/failure-chain.js");
-const { ERROR_KIND_LABEL } = require("../.tmp-verify/error-signature.js");
-const { suggestRemediation, isActionable } = require("../.tmp-verify/remediation.js");
-const { diagnose, ROOT_CAUSE_LABEL } = require("../.tmp-verify/diagnoser.js");
-const { buildRecurrence, weekBuckets } = require("../.tmp-verify/recurrence.js");
+const { extractFailureChains } = require("../.tmp-verify/detect/failure-chain.js");
+const { ERROR_KIND_LABEL } = require("../.tmp-verify/detect/error-signature.js");
+const { suggestRemediation, isActionable } = require("../.tmp-verify/detect/remediation.js");
+const {
+  diagnose,
+  diagnoseCase,
+  ROOT_CAUSE_LABEL,
+  SUB_TYPE_LABEL,
+} = require("../.tmp-verify/detect/diagnoser.js");
+const { attributeByRules } = require("../.tmp-verify/diagnose/l2-rules.js");
+const { buildRecurrence, weekBuckets } = require("../.tmp-verify/detect/recurrence.js");
+
+/* ------------------------------------------------------------------ */
+/* L1 因果链：产物 ↔ 生产者                                            */
+/* ------------------------------------------------------------------ */
+
+/** 从文本里抽产物路径（文件扩展名白名单，避免把命令名当文件） */
+const ARTIFACT_RE = /([\w][\w./\\-]*\.(?:json|ya?ml|py|md|txt|csv|tsx?|jsx?|html))\b/g;
+
+function artifactsIn(text) {
+  const out = new Set();
+  for (const m of String(text ?? "").matchAll(ARTIFACT_RE)) out.add(m[1].replace(/\\/g, "/"));
+  return [...out];
+}
+
+/**
+ * 回溯：这条失败命令引用的产物，是哪个 span 写出来的。
+ *
+ * 为什么必须有这一步：`python validate.py a.json` 报「a.json 不符合 schema」时，
+ * 失败的是校验器，它的入参完全合法。要改的是生成 a.json 的那一步。
+ * 不做回溯，模型只能看着合法的命令硬猜「入参构造错」——标注里 5 条错在这里。
+ */
+function producersOf(list, failIdx, artifactNames) {
+  const out = [];
+  for (let i = failIdx - 1; i >= 0 && out.length < 3; i--) {
+    const s = list[i];
+    if (s.kind !== "tool_call" && s.kind !== "command") continue;
+    const inp = String(s.input ?? "");
+    if (!inp.trim()) continue;
+    const hit = artifactNames.find((n) => inp.includes(n));
+    if (!hit) continue;
+    // 只有「写」才算生产者：读、grep、cat 都不算
+    const isEdit = /^(?:edit|edit_file|str_replace)/i.test(s.name ?? "");
+    const isWrite = isEdit || /^(?:write|write_file|create)/i.test(s.name ?? "");
+    const isRedirect = /(?:^|[^>])>{1,2}\s*[^|&]/.test(inp);
+    if (!isWrite && !isRedirect) continue;
+    out.push({ spanId: s.id, tool: s.name, path: hit, how: isEdit ? "edit" : "write" });
+  }
+  return out;
+}
+
+/** 会话里是否读过约束文档：读过说明「约束对模型可见」，违反它不能算需求不清 */
+const CONSTRAINT_DOC_RE = /(?:SKILL\.md|schema|ppt_dsl|deck_check|validate[_a-z]*\.py|checker)/i;
+
+/** 只用确定性规则层判一次。未命中返回 null（不是错误，是「规则判不了」） */
+function rulesOnlyOf(input) {
+  const r = attributeByRules({
+    tool: input.tool,
+    errorText: input.errorText,
+    spanInput: input.spanInput,
+    spanOutput: input.spanOutput,
+    kind: input.errorKind,
+    ...input.ruleContext,
+  });
+  if (!r) return null;
+  return {
+    rootCause: r.rootCause,
+    subType: r.subType,
+    narrative: [r.reasons.join("；"), r.targetNote ?? r.adviceTrap].filter(Boolean).join("；"),
+    evidenceRefs: r.reasons,
+    suggestion: r.advice ?? "",
+    confidence: r.confidence,
+    layer: "rules",
+    targetSpanId: r.targetSpanId,
+  };
+}
 
 const prisma = new PrismaClient();
 const OUT_DIR = path.join(__dirname, "..", ".tmp-verify");
@@ -126,6 +197,7 @@ async function mapPool(items, limit, fn) {
 (async () => {
   const dryRun = process.argv.includes("--dry-run");
   const noCache = process.argv.includes("--no-cache");
+  const rulesOnly = process.argv.includes("--rules-only");
   // --flag value 形式的覆盖项单独摘出，避免它的值被当成 Agent 名
   const VALUE_FLAGS = {
     "--api-key": "apiKey",
@@ -274,6 +346,16 @@ async function mapPool(items, limit, fn) {
       const brief = (s) =>
         s ? `${s.kind}/${s.name} [${s.status}] ${clip(s.error || s.output || "", 200)}` : "（无）";
 
+      // L1：失败命令引用的产物，在本会话前序被谁写过
+      const artifacts = artifactsIn(String(span.input ?? ""));
+      const producers = producersOf(list, idx, artifacts.map((a) => a.split("/").pop()));
+      // 读过约束文档 → 违反已文档化的约束不能归为「需求不清」
+      const readConstraintDoc = list
+        .slice(0, idx)
+        .some((s) => s.kind === "read" || s.kind === "tool_call" || s.kind === "command")
+        ? list.slice(0, idx).some((s) => CONSTRAINT_DOC_RE.test(String(s.input ?? "")))
+        : false;
+
       targets.push({
         sessionId,
         spanId: span.id,
@@ -295,7 +377,15 @@ async function mapPool(items, limit, fn) {
           prevSpan: brief(prev),
           nextSpan: brief(next),
           recurrence: recurrenceByAgent.get(agentId)?.get(chain.signature.family) ?? "",
+          // L2 规则层的上下文：全部在前面的确定性步骤里算好，模型不参与
+          ruleContext: {
+            producers,
+            touchedTargetBefore: producers.length > 0,
+            readConstraintDoc,
+          },
         },
+        artifacts,
+        producers,
         rule: suggestRemediation(chain.signature),
       });
     }
@@ -306,10 +396,12 @@ async function mapPool(items, limit, fn) {
   console.log(`待诊断 ${targets.length} 条，本次跑 ${list.length} 条（并发 ${CONCURRENCY}）`);
 
   let done = 0;
-  const cache = noCache || dryRun ? {} : loadCache();
+  // --rules-only：只用确定性规则层，不调模型。缓存无意义（秒级），直接关掉
+  const cache = noCache || dryRun || rulesOnly ? {} : loadCache();
   const cacheKey = (t) => `${cfg.model}::${t.spanId}`;
   const cachedCount = dryRun ? 0 : list.filter((t) => cache[cacheKey(t)]).length;
   if (cachedCount > 0) console.log(`命中缓存 ${cachedCount} 条，需新跑 ${list.length - cachedCount} 条`);
+  if (rulesOnly) console.log("模式：--rules-only（纯确定性，不调用模型）");
 
   const results = dryRun
     ? list.map((t) => ({ ...t, diagnosis: null, ms: 0 }))
@@ -321,7 +413,13 @@ async function mapPool(items, limit, fn) {
         if (hit) return { ...t, diagnosis: hit, ms: 0, cached: true };
         const t0 = Date.now();
         try {
-          const d = await diagnose(t.input, cfg);
+          if (rulesOnly) {
+            const d = rulesOnlyOf(t.input);
+            // 规则层未命中是正常结果，不是错误：记为 undecided，报告里单列
+            done += 1;
+            return { ...t, diagnosis: d, undecided: !d, ms: Date.now() - t0 };
+          }
+          const d = await diagnoseCase(t.input, cfg);
           cache[cacheKey(t)] = d;
           saveCache(cache); // 每跑完一条就落盘，中途断掉不用重跑已完成的
           done += 1;
@@ -340,8 +438,11 @@ async function mapPool(items, limit, fn) {
 
   /* ---------------- 产出报告 ---------------- */
   const now = new Date().toISOString().replace("T", " ").slice(0, 16);
-  const ok = dryRun ? [] : results.filter((r) => !r.error);
+  const ok = dryRun ? [] : results.filter((r) => !r.error && !r.undecided);
   const failed = dryRun ? [] : results.filter((r) => r.error);
+  const undecided = dryRun ? [] : results.filter((r) => r.undecided);
+  const byRules = ok.filter((r) => r.diagnosis.layer === "rules").length;
+  const byLlm = ok.filter((r) => r.diagnosis.layer === "llm").length;
 
   const dist = new Map();
   for (const r of ok) {
@@ -353,12 +454,14 @@ async function mapPool(items, limit, fn) {
   lines.push(`# ${dryRun ? "诊断证据包（dry-run）" : "根因诊断报告"}`);
   lines.push("");
   lines.push(`- 生成时间：${now}`);
-  lines.push(`- 模型：${cfg.model}`);
+  lines.push(`- 模型：${rulesOnly ? "（--rules-only 未调用）" : cfg.model}`);
   lines.push(`- 范围：${argAgent ?? "全部 Agent"}｜待处理失败链 ${targets.length} 条，本次${dryRun ? "装配" : "诊断"} ${list.length} 条`);
   if (!dryRun) {
     const deg = ok.filter((r) => r.diagnosis?.degraded).length;
-    lines.push(`- 成功 ${ok.length} 条，失败 ${failed.length} 条${deg > 0 ? `（其中 ${deg} 条证据被裁剪，结论可信度偏低）` : ""}`);
-    lines.push(`- ⚠️ 失败 ≠ 没有根因：这些是模型处理不了的输入，不计入你的标注，但也不该当成已解决。`);
+    lines.push(`- **结论来源**：确定性规则层 ${byRules} 条｜大模型 ${byLlm} 条${undecided.length ? `｜规则层未判定 ${undecided.length} 条` : ""}`);
+    lines.push(`- 成功 ${ok.length} 条，失败 ${failed.length} 条${deg > 0 ? `（其中 ${deg} 条证据被裁剪）` : ""}`);
+    if (undecided.length) lines.push(`- 未判定不是「没有根因」：这些是规则层没有覆盖的模式，需要补规则或人工看。`);
+    if (failed.length) lines.push(`- 失败 ≠ 没有根因：这些是模型处理不了的输入，不该当成已解决。`);
   }
   lines.push("");
   if (dist.size > 0) {
@@ -401,6 +504,18 @@ async function mapPool(items, limit, fn) {
     lines.push(`- 会话：[${r.sessionId.slice(0, 8)}](${TRACE_BASE}/trace/${r.sessionId}?spanId=${encodeURIComponent(r.spanId)})`);
     if (r.input.recurrence) lines.push(`- 复发：${r.input.recurrence}`);
 
+    if (r.undecided) {
+      lines.push("");
+      lines.push(`> 规则层未判定（--rules-only 模式）：这条的失败模式还没有对应的确定性判据。`);
+      lines.push(`> 它是**补规则**的候选，不是「没有根因」。`);
+      if (r.artifacts?.length) lines.push(`- 涉及产物：${r.artifacts.join("、")}`);
+      if (r.producers?.length) lines.push(`- 生产者：${r.producers[0].tool} → ${r.producers[0].path}`);
+      lines.push("");
+      lines.push("---");
+      lines.push("");
+      return;
+    }
+
     if (dryRun) {
       // dry-run 只检查证据装配：模型会看到的每一块都摊开，便于发现「诉求取空/序列错位」
       lines.push("");
@@ -440,13 +555,27 @@ async function mapPool(items, limit, fn) {
     }
 
     const d = r.diagnosis;
+    const layerTag = d.layer === "rules" ? "确定性规则层" : "大模型";
+    const subTag = d.subType ? `　子型：${SUB_TYPE_LABEL?.[d.subType] ?? d.subType}` : "";
     lines.push("");
-    lines.push(`**LLM 判定**：\`${d.rootCause}\`（${ROOT_CAUSE_LABEL[d.rootCause] ?? d.rootCause}）　置信度 ${d.confidence.toFixed(2)}　耗时 ${r.cached ? "缓存" : `${r.ms}ms`}${d.degraded ? "　⚠️ 证据被裁剪（原证据超时）" : ""}`);
+    lines.push(
+      `**判定**：\`${d.rootCause}\`（${ROOT_CAUSE_LABEL[d.rootCause] ?? d.rootCause}）${subTag}　来源：${layerTag}　置信度 ${d.confidence.toFixed(2)}${r.cached ? "　（缓存）" : ""}${d.degraded ? "　⚠️ 证据被裁剪" : ""}`,
+    );
+    // 校验层告警必须紧贴结论：读者先看到「哪一条站不住」，再看叙述，才不会被带跑
+    if (d.verify?.violations?.length) {
+      lines.push("");
+      lines.push(`> ⚠️ **校验层告警**（这条结论有明确的确定性缺陷）`);
+      for (const v of d.verify.violations) lines.push(`> - ${v}`);
+    }
     lines.push("");
     lines.push(`> ${d.narrative.replace(/\n/g, " ")}`);
     lines.push("");
+    if (d.targetSpanId && d.targetSpanId !== r.spanId) {
+      lines.push(`- **真正要改的不是这次失败调用**：责任在 span \`${d.targetSpanId.slice(0, 8)}\`（${d.layer === "rules" ? "由产物生产者回溯得出" : "模型判定"}）`);
+    }
     if (d.evidenceRefs.length > 0) {
-      lines.push(`**引用证据**`);
+      lines.push("");
+      lines.push(d.layer === "rules" ? `**判定依据**（每条都可复现）` : `**引用证据**`);
       lines.push("");
       for (const e of d.evidenceRefs) lines.push(`- \`${clip(e, 200)}\``);
       lines.push("");
