@@ -147,7 +147,9 @@ export async function runExperiment(
         caseData.sessionId,
         caseData.input,
         caseData.actualOutput,
-        caseData.referenceOutput
+        caseData.referenceOutput,
+        // M2.3：原会话被清理时回退生成 case 时固化的轨迹快照
+        caseData.evaluatorContextJson,
       );
 
       const startTime = Date.now();

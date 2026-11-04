@@ -31,7 +31,17 @@ interface Session {
   totalTokens: number;
 }
 
-const steps = ["基本信息", "选择评估器", "选择 Session", "填写参考答案", "确认创建"];
+/** 问题单（M2.2「从问题单选起」） */
+interface IssueItem {
+  id: string;
+  severity: string;
+  status: string;
+  title: string;
+  occurrences: number;
+  lastSeenAt: string;
+}
+
+const steps = ["基本信息", "选择评估器", "选择用例来源", "填写参考答案", "确认创建"];
 
 export default function NewExperimentPage() {
   const router = useRouter();
@@ -46,6 +56,11 @@ export default function NewExperimentPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  // 用例来源：sessions（按会话抽样，原路径）| issues（按问题单入集，M2.2）
+  const [source, setSource] = useState<"sessions" | "issues">("sessions");
+  const [issues, setIssues] = useState<IssueItem[]>([]);
+  const [selectedIssues, setSelectedIssues] = useState<string[]>([]);
+  const [issueExpected, setIssueExpected] = useState<Record<string, string>>({});
 
   useEffect(() => {
     fetch("/api/agents")
@@ -65,8 +80,27 @@ export default function NewExperimentPage() {
     }
   }, [selectedAgentId]);
 
+  // 问题单列表：按所选 Agent 过滤，只取待处理（open/ack）——fixed 的从详情页补录更合适
+  useEffect(() => {
+    if (selectedAgentId && source === "issues") {
+      const agentName = agents.find((a) => a.id === selectedAgentId)?.name ?? "";
+      fetch(`/api/issues?agentName=${encodeURIComponent(agentName)}&status=open,ack`)
+        .then((r) => r.json())
+        .then((data) => setIssues(Array.isArray(data) ? data : []))
+        .catch(() => setIssues([]));
+    } else {
+      setIssues([]);
+    }
+  }, [selectedAgentId, source, agents]);
+
   const toggleSession = (id: string) => {
     setSelectedSessions((prev) =>
+      prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]
+    );
+  };
+
+  const toggleIssue = (id: string) => {
+    setSelectedIssues((prev) =>
       prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]
     );
   };
@@ -98,7 +132,7 @@ export default function NewExperimentPage() {
           })
         );
       case 2:
-        return selectedSessions.length > 0;
+        return selectedSessions.length > 0 || selectedIssues.length > 0;
       case 3:
         return true;
       case 4:
@@ -115,6 +149,7 @@ export default function NewExperimentPage() {
         sessionId,
         referenceOutput: referenceOutputs[sessionId] || null,
       }));
+      // issues 来源：先建实验壳（可 0 用例），再逐条灌入回归用例
       const res = await fetch("/api/experiments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -127,9 +162,29 @@ export default function NewExperimentPage() {
         }),
       });
       const data = await res.json();
-      if (data.id) {
-        router.push(`/experiments/${data.id}`);
+      if (!data.id) {
+        setSubmitting(false);
+        return;
       }
+      if (source === "issues" && selectedIssues.length > 0) {
+        const results = await Promise.all(
+          selectedIssues.map((issueId) =>
+            fetch(`/api/issues/${issueId}/cases`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                experimentId: data.id,
+                expectedBehavior: issueExpected[issueId] || undefined,
+              }),
+            }).then((r) => r.json()),
+          ),
+        );
+        const failed = results.filter((r) => r?.error).length;
+        if (failed > 0) {
+          console.warn(`[experiments/new] ${failed} 个问题单入集失败`, results);
+        }
+      }
+      router.push(`/experiments/${data.id}`);
     } catch {
       setSubmitting(false);
     }
@@ -254,46 +309,100 @@ export default function NewExperimentPage() {
 
         {currentStep === 2 && (
           <Card>
-            <CardHeader>
-              <CardTitle>选择 Session</CardTitle>
+            <CardHeader className="flex-row items-center justify-between space-y-0">
+              <CardTitle>选择用例来源</CardTitle>
+              <div className="flex items-center gap-1 rounded-md bg-muted p-0.5">
+                {(["sessions", "issues"] as const).map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setSource(s)}
+                    className={`rounded-sm px-3 py-1 text-[13px] transition-colors ${
+                      source === s
+                        ? "bg-background font-medium shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {s === "sessions" ? "按会话抽样" : "按问题单入集"}
+                  </button>
+                ))}
+              </div>
             </CardHeader>
             <CardContent>
-              {sessions.length === 0 ? (
+              {source === "sessions" ? (
+                sessions.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-8">
+                    该 Agent 暂无可用 Session
+                  </p>
+                ) : (
+                  <>
+                    <div className="space-y-2 max-h-[400px] overflow-y-auto scrollbar-thin">
+                      {sessions.map((session) => (
+                        <button
+                          key={session.id}
+                          onClick={() => toggleSession(session.id)}
+                          className={`flex w-full items-center justify-between rounded-md p-3 text-left transition-colors ${
+                            selectedSessions.includes(session.id)
+                              ? "bg-primary/5 ring-1 ring-primary/40"
+                              : "ring-1 ring-foreground/10 hover:ring-foreground/25"
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <div>
+                              <div className="font-mono text-[13px] tabular-nums">{session.id.slice(-8)}</div>
+                              <div className="text-xs text-muted-foreground tabular-nums">
+                                {new Date(session.startTime).toLocaleDateString("zh-CN")} · {session.totalRounds} 轮 · {session.totalTokens.toLocaleString()} tokens
+                              </div>
+                            </div>
+                          </div>
+                          <Badge
+                            variant={session.status === "completed" ? "outline" : "destructive"}
+                          >
+                            {session.status}
+                          </Badge>
+                        </button>
+                      ))}
+                    </div>
+                    {selectedSessions.length > 0 && (
+                      <p className="mt-3 text-sm text-muted-foreground">
+                        已选择 {selectedSessions.length} 个 Session
+                      </p>
+                    )}
+                  </>
+                )
+              ) : issues.length === 0 ? (
                 <p className="text-sm text-muted-foreground text-center py-8">
-                  该 Agent 暂无可用 Session
+                  该 Agent 暂无待处理问题单（可先在 Agent 详情页「重算」生成）
                 </p>
               ) : (
                 <>
                   <div className="space-y-2 max-h-[400px] overflow-y-auto scrollbar-thin">
-                    {sessions.map((session) => (
+                    {issues.map((issue) => (
                       <button
-                        key={session.id}
-                        onClick={() => toggleSession(session.id)}
-                        className={`flex w-full items-center justify-between rounded-md p-3 text-left transition-colors ${
-                          selectedSessions.includes(session.id)
+                        key={issue.id}
+                        onClick={() => toggleIssue(issue.id)}
+                        className={`flex w-full items-center justify-between gap-3 rounded-md p-3 text-left transition-colors ${
+                          selectedIssues.includes(issue.id)
                             ? "bg-primary/5 ring-1 ring-primary/40"
                             : "ring-1 ring-foreground/10 hover:ring-foreground/25"
                         }`}
                       >
-                        <div className="flex items-center gap-3">
-                          <div>
-                            <div className="font-mono text-[13px] tabular-nums">{session.id.slice(-8)}</div>
-                            <div className="text-xs text-muted-foreground tabular-nums">
-                              {new Date(session.startTime).toLocaleDateString("zh-CN")} · {session.totalRounds} 轮 · {session.totalTokens.toLocaleString()} tokens
-                            </div>
+                        <div className="min-w-0">
+                          <div className="truncate text-[13px]" title={issue.title}>
+                            {issue.title}
+                          </div>
+                          <div className="text-xs text-muted-foreground tabular-nums">
+                            ×{issue.occurrences} 次 · 最近 {new Date(issue.lastSeenAt).toLocaleDateString("zh-CN")}
                           </div>
                         </div>
-                        <Badge
-                          variant={session.status === "completed" ? "outline" : "destructive"}
-                        >
-                          {session.status}
+                        <Badge variant={issue.severity === "critical" ? "destructive" : "outline"}>
+                          {issue.severity === "critical" ? "严重" : "关注"}
                         </Badge>
                       </button>
                     ))}
                   </div>
-                  {selectedSessions.length > 0 && (
+                  {selectedIssues.length > 0 && (
                     <p className="mt-3 text-sm text-muted-foreground">
-                      已选择 {selectedSessions.length} 个 Session
+                      已选择 {selectedIssues.length} 个问题单 · 创建时自动固化轨迹快照入集
                     </p>
                   )}
                 </>
@@ -305,8 +414,12 @@ export default function NewExperimentPage() {
         {currentStep === 3 && (
           <Card className="flex-1 min-h-0 flex flex-col">
             <CardHeader className="pb-3 shrink-0">
-              <CardTitle>填写参考答案</CardTitle>
-              {needsReference ? (
+              <CardTitle>{source === "issues" ? "填写期望行为" : "填写参考答案"}</CardTitle>
+              {source === "issues" ? (
+                <p className="text-sm text-muted-foreground">
+                  为每个问题单填写期望行为（可留空，缺省为「不再复现」）——作为回归判定与 referenceOutput 的候选来源。
+                </p>
+              ) : needsReference ? (
                 <p className="text-sm text-muted-foreground">
                   你选择了需要参考答案的评估器，建议为每个 Session 填写参考答案以获得更准确的评测结果。
                 </p>
@@ -317,24 +430,43 @@ export default function NewExperimentPage() {
               )}
             </CardHeader>
             <CardContent className="flex-1 min-h-0 overflow-y-auto scrollbar-thin space-y-4">
-              {selectedSessions.map((sessionId) => {
-                return (
-                  <div key={sessionId} className="rounded-md p-4 ring-1 ring-foreground/10">
-                    <div className="mb-2 flex items-center gap-2">
-                      <span className="font-mono text-[13px] tabular-nums">{sessionId.slice(-8)}</span>
-                      {needsReference && (
-                        <Badge variant="outline">建议填写</Badge>
-                      )}
-                    </div>
-                    <Textarea
-                      placeholder="输入参考答案（可选）..."
-                      value={referenceOutputs[sessionId] || ""}
-                      onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setReferenceOutput(sessionId, e.target.value)}
-                      className="min-h-[80px]"
-                    />
-                  </div>
-                );
-              })}
+              {source === "issues"
+                ? selectedIssues.map((issueId) => {
+                    const issue = issues.find((i) => i.id === issueId);
+                    return (
+                      <div key={issueId} className="rounded-md p-4 ring-1 ring-foreground/10">
+                        <div className="mb-2 truncate text-[13px]" title={issue?.title}>
+                          {issue?.title ?? issueId.slice(-8)}
+                        </div>
+                        <Textarea
+                          placeholder="期望行为（可选，如「不再抛 pydantic ValidationError」）..."
+                          value={issueExpected[issueId] || ""}
+                          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) =>
+                            setIssueExpected((prev) => ({ ...prev, [issueId]: e.target.value }))
+                          }
+                          className="min-h-[80px]"
+                        />
+                      </div>
+                    );
+                  })
+                : selectedSessions.map((sessionId) => {
+                    return (
+                      <div key={sessionId} className="rounded-md p-4 ring-1 ring-foreground/10">
+                        <div className="mb-2 flex items-center gap-2">
+                          <span className="font-mono text-[13px] tabular-nums">{sessionId.slice(-8)}</span>
+                          {needsReference && (
+                            <Badge variant="outline">建议填写</Badge>
+                          )}
+                        </div>
+                        <Textarea
+                          placeholder="输入参考答案（可选）..."
+                          value={referenceOutputs[sessionId] || ""}
+                          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setReferenceOutput(sessionId, e.target.value)}
+                          className="min-h-[80px]"
+                        />
+                      </div>
+                    );
+                  })}
             </CardContent>
           </Card>
         )}
@@ -363,13 +495,21 @@ export default function NewExperimentPage() {
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-[13px] text-muted-foreground">Session 数量</span>
-                  <span className="text-[13px] font-medium tabular-nums">{selectedSessions.length} 个</span>
+                  <span className="text-[13px] text-muted-foreground">
+                    {source === "issues" ? "问题单数量" : "Session 数量"}
+                  </span>
+                  <span className="text-[13px] font-medium tabular-nums">
+                    {source === "issues" ? `${selectedIssues.length} 个` : `${selectedSessions.length} 个`}
+                  </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-[13px] text-muted-foreground">已填参考答案</span>
+                  <span className="text-[13px] text-muted-foreground">
+                    {source === "issues" ? "已填期望行为" : "已填参考答案"}
+                  </span>
                   <span className="text-[13px] font-medium tabular-nums">
-                    {Object.values(referenceOutputs).filter((v) => v.trim()).length} / {selectedSessions.length}
+                    {source === "issues"
+                      ? `${Object.entries(issueExpected).filter(([k, v]) => selectedIssues.includes(k) && v.trim()).length} / ${selectedIssues.length}`
+                      : `${Object.values(referenceOutputs).filter((v) => v.trim()).length} / ${selectedSessions.length}`}
                   </span>
                 </div>
               </div>
@@ -392,7 +532,7 @@ export default function NewExperimentPage() {
           上一步
         </Button>
         <div className="flex items-center gap-2">
-          {currentStep === 3 && !needsReference && (
+          {(currentStep === 3 && (!needsReference || source === "issues")) && (
             <Button
               variant="ghost"
               onClick={() => setCurrentStep(4)}

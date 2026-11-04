@@ -52,9 +52,7 @@ export async function POST(request: Request) {
 
   const caseItems = cases || (caseIds?.map((id: string) => ({ sessionId: id })) ?? []);
 
-  if (caseItems.length === 0) {
-    return NextResponse.json({ error: "At least one case is required" }, { status: 400 });
-  }
+  // 允许 0 用例创建：「从问题单选起」流程先建实验壳，再由 /api/issues/[id]/cases 批量灌入
 
   // 按轮拆 case（2026-11-04 口径）：每个会话拆成 N 个「轮次问答对」，
   // input = 该轮用户诉求，actualOutput = 该轮末条非空 answer。

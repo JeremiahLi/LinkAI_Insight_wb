@@ -17,9 +17,10 @@ async function resolveActualOutput(
     where: { sessionId, kind: "answer" },
     orderBy: [{ roundIndex: "asc" }, { turnId: "asc" }],
   });
-  const live = answerSpans.find((s) => s.output && s.output.trim())?.output;
-  if (live) {
-    return { actualOutput: live, hasRealOutput: true };
+  // 末条非空（2026-11-04 与 judge-assembly 同口径：评的是最终交付物，不是中间轮次）
+  const lastLive = [...answerSpans].reverse().find((s) => s.output && s.output.trim())?.output;
+  if (lastLive) {
+    return { actualOutput: lastLive, hasRealOutput: true };
   }
   return { actualOutput: snapshot, hasRealOutput: false };
 }
