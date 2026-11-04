@@ -680,3 +680,36 @@ scripts/diagnose-cli.cjs            L1 产物生产者回溯（producers）
 
 - **编码判据一开始过宽**：用「错误文本含 U+FFFD」直接判编码损坏，23 条里 14 条被误判 —— 本项目中文输出普遍被采集端按错误编码写进 error，乱码是背景噪声。收窄为「约束类型是字符长度 + 出问题的值里 U+FFFD 成段出现 + 排除数量类约束」后降到 3 条。
 - **`prisma/dev.db` 不能随手提交**：它 46MB 且内含模型 key，GitHub 的 secret scanning 会拒绝推送（`push declined due to repository rule violations`）。本次因此撤回重提。长期应 `git rm --cached prisma/dev.db` 并入 .gitignore。
+
+### 2026-11-04 · M0 口径修正 + M1.4 Issue 实体化（已完成）
+
+**M0.3 采集端契约扩展**（`pi-extensions捕获脚本/pi_extension_capture.ts` + 运行时 upload.cjs）
+- session_start 新增 `agent_git_sha`（纯文件读取 .git/HEAD，覆盖分支/detached/packed-refs 三形态，拿不到如实空串）。
+- `prompt_hash`：before_agent_start 时对 systemPrompt 做 sha1，写到**每条记录顶层 promptHash**（session_start 先于该事件触发，自身带不上属预期）；upload.cjs 既有 `r.promptHash` 提升逻辑直接接住，服务端已有 `body.promptHash` 落 Session.promptHash。
+- upload.cjs 补 `payload.agent_git_sha → body.agentGitSha` 提升；服务端 route 仅声明类型（M3 Release 表落地前透传不入库）。
+- **注意**：仓库里是采集脚本源码，运行时扩展副本若部署在别处需重新同步；版本字段仍依赖 `.pi/agent.json` 的 `version`（实测 149 个文件仅 1 个有值，覆盖率要靠 agent.json 补齐）。
+
+**M0.5 + partial 口径修正**（`derive.computeOutcome` v2）
+- partial 只认**未自愈失败**：failure-chain 判 `retried_recovered` 的工具失败不再计入；`not_an_error`（日志误写）同源剔除；answer/llm_thinking 级失败始终计入（实测 8 个 partial 的失败在 answer 级）。
+- 新增 `truncated` 终态：末条 answer 无交付 + 此前有非空交付 + 交付后无新 user 追问 → 假失败（采集端收尾补写空 answer）。真失败（追问未回复）仍记 failed。
+- `SQL_BAD` 暂并入 truncated（成功率分母不变口径），`SQL_TRUNCATED` 单列供标注；OutcomeBadge/normalizeOutcome/上传 route（truncated→completed 非 error）同步。
+- **回填实测（243 会话）**：31 处变化 —— success 133→160、partial 68→41、failed 18→14、truncated 4；**成功率 76.3% → 82.4%**。此前 8.4pp 的预估偏高，实际 6.1pp（37 条自愈的估算含部分 answer 级失败场景）。
+- 回填脚本（CJS）复用 `detect:build` 编译产物做自愈判定，不再手写第三份逻辑；缺失时退回旧口径并告警。
+- truncated 机制就位但当前库仅 4 例：缺陷 C 里的 9 条「有历史交付的 failed」全部存在交付后新追问，属真失败。
+
+**M0.1 用例抽取口径**（`session-data.ts` / `judge-assembly.ts` / 两个 experiments 路由）
+- actualOutput 改取**末条非空 answer**；新增 `extractSessionRounds` 按轮拆 case（轮 = 首条非空 user 输入 + 末条非空 answer），`ExperimentCase` 加 `roundIndex Int?` 列，追加用例的去重键改为 `(sessionId, roundIndex)`。
+- 体检脚本实测按轮非空率 91.1%（576/632，多轮会话 166）< 95% 验收线：缺口来自采集端 26.3% 的 answer 空值率（数据源问题），不是抽取逻辑问题。
+
+**M0.4 数据体检脚本**（`scripts/data-health.cjs`，--json 可机读）
+- A answer 空值率 26.3% · B truncated 候选独立复算（与 computeOutcome 互为校验，首版因 select 漏 kind 字段全量误跳过，已修）· C outcome 分布 + 新口径成功率 · D 版本覆盖（agentVersion/promptHash 仍 0/243，等采集端上线）· E 按轮抽取非空率。
+
+**M1.4 Issue 实体化**
+- schema：`Issue` 表（agentId+fingerprint 唯一，occurrences/lastSeenAt/status/fixedInVersion/caseIdsJson），db push + generate 完成。
+- `src/lib/engine/issues/recompute.ts`：按 detect 层失败链重算，指纹 `tool_failure_chain:<family>:<tool>`。**与 PLAN 原文的偏差**：occurrences 取窗口实测计数而非累加（重跑幂等，PLAN 的累加语义在重复重算时会双计）；状态机只有 open/ack/fixed/wontfix/stale 五态（分叉仓库的 candidate 中间态不合并）。fixed 指纹再次出现自动重开；wontfix 不推翻；窗口外 open → stale。
+- API：GET /api/issues（agentName/status/severity 过滤）、POST /api/issues/recompute、PATCH /api/issues/[id]（fixed 必填 fixedInVersion，实测无版本被 400 拒绝）。
+- UI：`issue-tracker-panel.tsx` 挂在 Agent 详情页「运行异常分析」下方——重算按钮、severity/status 徽章、×occurrences、trace 深链、确认/标记已修（内联版本输入）/不修。无头 Chrome 截图验证布局正常。
+- 标题对 garbled（25.8% 乱码）错误显式标注「（原文编码损坏）」。
+- 实测（agentcodebuddy，180 天）：5 条失败链 → 4 个问题单；PATCH 生命周期与复发重开全链路验证通过。
+
+**运维坑（复用旧结论）**：prisma generate EPERM = 残留 dev server 持有 query engine dll；本次 3010 端口有个 generate 之前启动的旧 dev server（内存里是旧 prisma client），杀树重启后接口才认识 Issue 表。

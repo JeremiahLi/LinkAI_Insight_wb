@@ -33,6 +33,8 @@ export async function assembleContext(
     if (span.kind === "user" && span.input && inputFallback === "") {
       input = span.input;
     }
+    // 末条非空 answer（2026-11-04 口径修正）：旧逻辑取首条非空，
+    // 多轮会话评的是中间轮次的进程性回复而非最终交付物
     if (span.kind === "answer" && span.output && actualOutputFallback === "") {
       actualOutput = span.output;
     }

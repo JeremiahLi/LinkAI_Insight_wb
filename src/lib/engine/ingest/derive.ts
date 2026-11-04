@@ -11,16 +11,27 @@
  * 3. 旧口径「任一 span failed 即整会话失败」会把「质检关卡回流后最终交付」误判为失败：
  *    实测某会话 3 个 answer 全 success，但有 13 个 tool_call 失败（bash 校验退出码 1）。
  *    故引入 outcome 三态，详见 computeOutcome。
+ * 4. 2026-11-04 口径修正（实测 68 个 partial 里 37 个工具失败全部自愈、8 个根本无工具
+ *    失败，partial 低估成功率约 8.4pp）：partial 只认「未自愈的失败」——工具失败经
+ *    failure-chain 判为 retried_recovered 的不计入；新增 truncated 终态识别假失败
+ *    （末轮无输出但此前有交付、且无新追问 → 采集端收尾补写的空 answer）。
  */
 
-export type SessionOutcome = "success" | "partial" | "failed" | "";
+import { extractFailureChains } from "../detect/failure-chain";
+import { signatureOf } from "../detect/error-signature";
+
+export type SessionOutcome = "success" | "partial" | "failed" | "truncated" | "";
 
 export interface InSpanLike {
+  /** failure-chain 需要稳定 id 标识被自愈覆盖的失败 span；缺省时按数组下标兜底 */
+  id?: string;
   kind?: string;
   name?: string;
   status?: string;
   input?: string | null;
   output?: string | null;
+  /** 错误文本：与采集端 Span.error 同源（isError 时的 output），自愈判定依赖它 */
+  error?: string | null;
   isError?: boolean;
   roundIndex?: number;
   turnId?: number;
@@ -166,13 +177,19 @@ export function deriveTitle(spans: InSpanLike[]): string {
 }
 
 /**
- * 会话终态三态判定。
+ * 会话终态判定（四态 + 未知）。
  *
  * 判定基准是「末条 answer 有没有交付」，而不是「有没有出现过 failed span」：
  * - 无 span：""（未知，不计入成功率分母，避免空会话拉低/抬高）
  * - 有 span 但无 answer，或末条 answer 失败/空输出：failed（真正没交付）
- * - 末条 answer 成功且有输出，过程中无 failed span：success
- * - 末条 answer 成功，但过程中有 failed span：partial（重试后修复、质检回流）
+ *   - 例外：末条 answer 空输出但此前有过非空交付、且之后没有新的 user 追问
+ *     → truncated（假失败，多为采集端收尾时补写的空 answer span；实测 18 条
+ *       failed 里 9 条属于这种）。truncated 暂按 failed 计入成功率（SQL_BAD），
+ *       详情页单独标注，观察两周后再决定是否剔除分母。
+ * - 末条 answer 成功且有输出，且过程失败全部自愈：success
+ * - 末条 answer 成功且有输出，但存在未自愈的失败：partial
+ *   （工具失败经 failure-chain 判 retried_recovered 的不算；answer/llm_thinking
+ *     级失败始终算 —— 实测 8 个 partial 的失败发生在 answer 级而非工具级）
  */
 export function computeOutcome(spans: InSpanLike[]): {
   outcome: SessionOutcome;
@@ -188,15 +205,70 @@ export function computeOutcome(spans: InSpanLike[]): {
 
   if (spans.length === 0) return { outcome: "", fatalErrors, errors };
 
-  const answers = spans
-    .filter((s) => s.kind === "answer")
-    .sort((a, b) => (a.roundIndex ?? 0) - (b.roundIndex ?? 0) || (a.turnId ?? 0) - (b.turnId ?? 0));
+  // 全程按 (roundIndex, turnId) 排序：answer 定位、truncated 判定、failure-chain
+  // 都依赖时间顺序。failure-chain 只看 roundIndex，但数组顺序必须先行正确。
+  const ordered = [...spans].sort(
+    (a, b) => (a.roundIndex ?? 0) - (b.roundIndex ?? 0) || (a.turnId ?? 0) - (b.turnId ?? 0),
+  );
 
+  const answers = ordered.filter((s) => s.kind === "answer");
   if (answers.length === 0) return { outcome: "failed", fatalErrors, errors };
 
   const last = answers[answers.length - 1];
   const delivered = last.status !== "failed" && (last.output ?? "").trim().length > 0;
-  if (!delivered) return { outcome: "failed", fatalErrors, errors };
 
-  return { outcome: errors > 0 ? "partial" : "success", fatalErrors, errors };
+  if (!delivered) {
+    // 假失败识别：末条 answer 空，但此前有过非空交付。若交付之后没有新的 user
+    // 追问，说明不是「用户追问未回复」（那才是真失败），而是会话在已有交付后被
+    // 截断/收尾。位置比较用排序后的下标，不依赖 roundIndex 连续性。
+    let lastDeliveredIdx = -1;
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      const s = ordered[i];
+      if (
+        s.kind === "answer" &&
+        s.status !== "failed" &&
+        (s.output ?? "").trim().length > 0
+      ) {
+        lastDeliveredIdx = i;
+        break;
+      }
+    }
+    if (lastDeliveredIdx >= 0) {
+      const hasNewAsk = ordered
+        .slice(lastDeliveredIdx + 1)
+        .some((s) => s.kind === "user");
+      if (!hasNewAsk) return { outcome: "truncated", fatalErrors, errors };
+    }
+    return { outcome: "failed", fatalErrors, errors };
+  }
+
+  // 自愈判定：failure-chain 提取「失败 → 重试 → 结局」，retried_recovered 的
+  // span 不再算过程失败。not_an_error（日志误写进 error）同样剔除，与
+  // detect 层的失败判定口径一致。
+  const chainSpans = ordered.map((s, i) => ({
+    id: s.id ?? `#${i}`,
+    roundIndex: s.roundIndex ?? 0,
+    kind: s.kind ?? "",
+    name: s.name ?? "",
+    status: s.status ?? "",
+    error: s.error ?? null,
+    output: s.output ?? null,
+  }));
+  const recoveredIds = new Set(
+    extractFailureChains(chainSpans)
+      .filter((c) => c.outcome === "retried_recovered")
+      .flatMap((c) => c.spanIds),
+  );
+
+  const unrecovered = chainSpans.some((s) => {
+    if (s.status !== "failed") return false;
+    if (s.kind === "answer" || s.kind === "llm_thinking") return true;
+    if (s.kind !== "tool_call" && s.kind !== "command") return false;
+    if (recoveredIds.has(s.id)) return false;
+    // 日志误写不是失败（与 failure-chain 的 isFailure 剔除逻辑同源）
+    const sig = signatureOf({ error: s.error, name: s.name, status: s.status });
+    return sig.kind !== "not_an_error";
+  });
+
+  return { outcome: unrecovered ? "partial" : "success", fatalErrors, errors };
 }

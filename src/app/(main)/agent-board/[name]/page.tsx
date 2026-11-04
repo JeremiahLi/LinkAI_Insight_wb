@@ -13,6 +13,7 @@ import { StackedBarTrendChart } from "@/components/charts/stacked-bar-trend-char
 import { HealthPanel } from "@/components/agent/health-panel";
 import { AgentIssueList } from "@/components/agent/agent-issue-list";
 import { FailureAnalysisPanel } from "@/components/agent/failure-analysis-panel";
+import { IssueTrackerPanel } from "@/components/agent/issue-tracker-panel";
 import { SymptomRecurrence } from "@/components/agent/symptom-recurrence";
 import { TopList } from "@/components/agent/top-list";
 import {
@@ -257,6 +258,19 @@ export default function AgentDetailPage() {
         </CardHeader>
         <CardContent className="pt-3">
           <FailureAnalysisPanel agentName={profile.name} range={range} />
+        </CardContent>
+      </Card>
+
+      {/* 问题单：持久化实体，可确认/标记已修/复发重开（与上方即时检测互补） */}
+      <Card>
+        <CardHeader className="flex-row items-baseline justify-between space-y-0 border-b border-border/60 pb-2.5">
+          <CardTitle>问题单</CardTitle>
+          <span className="text-[11px] text-muted-foreground/80">
+            检测结论落库 · 按 fingerprint 跨会话聚合 · 标记已修需填版本号
+          </span>
+        </CardHeader>
+        <CardContent className="pt-3">
+          <IssueTrackerPanel agentName={profile.name} range={range} />
         </CardContent>
       </Card>
 

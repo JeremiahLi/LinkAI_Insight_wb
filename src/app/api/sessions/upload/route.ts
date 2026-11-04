@@ -23,6 +23,8 @@ export async function POST(request: Request) {
     agentVersion?: string | null;
     /** 提示词指纹：同版本号但 prompt 改过时用于区分 */
     promptHash?: string | null;
+    /** git commit sha（采集端读 cwd/.git）。M3 Release 表落地前仅透传，不入库 */
+    agentGitSha?: string | null;
     skillSetHash?: string | null;
     configHash?: string | null;
     /** 父会话 id：跨进程父子链（采集端经环境变量链上报）；缺省/自环时为 null */
@@ -285,13 +287,18 @@ function toIntOr(v: unknown, fallback: number): number {
     const allSpans = await prisma.span.findMany({
       where: { sessionId: sessionID },
       select: {
+        // id + error：computeOutcome 的自愈判定（failure-chain retried_recovered）
+        // 需要稳定 span id 与错误文本，缺了会把自愈失败误算成 partial
+        id: true,
         roundIndex: true,
         turnId: true,
         kind: true,
+        name: true,
         status: true,
         duration: true,
         input: true,
         output: true,
+        error: true,
         inputTokens: true,
         outputTokens: true,
         cacheReadTokens: true,

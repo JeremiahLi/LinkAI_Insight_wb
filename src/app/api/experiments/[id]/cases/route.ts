@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { extractSessionData } from "@/lib/engine/experiment/session-data";
+import { extractSessionData, extractSessionRounds } from "@/lib/engine/experiment/session-data";
 
 
 // 向已有实验批量追加用例（session 抽样场景）
@@ -13,7 +13,7 @@ export async function POST(
 
   const experiment = await prisma.experiment.findUnique({
     where: { id },
-    include: { cases: { select: { sessionId: true } } },
+    include: { cases: { select: { sessionId: true, roundIndex: true } } },
   });
 
   if (!experiment) {
@@ -32,20 +32,22 @@ export async function POST(
     return NextResponse.json({ error: "At least one case is required" }, { status: 400 });
   }
 
-  // 按已有 sessionId 去重，避免同一 session 产生重复用例
-  const existingSessionIds = new Set(
-    experiment.cases.map((c) => c.sessionId).filter((s): s is string => s !== null)
+  // 按已有 (sessionId, roundIndex) 去重：多轮会话按轮拆 case（2026-11-04 口径），
+  // 同一会话的每一轮是独立用例，只按 sessionId 去重会误杀第 2+ 轮
+  const existingKeys = new Set(
+    experiment.cases.map((c) => `${c.sessionId || ""}#${c.roundIndex ?? ""}`),
   );
 
   const skipped: string[] = [];
   const toCreate: { sessionId?: string; referenceOutput?: string | null }[] = [];
   for (const item of caseItems) {
     const sessionId = item.sessionId || "";
-    if (sessionId && existingSessionIds.has(sessionId)) {
+    if (sessionId && existingKeys.has(`${sessionId}#`)) {
+      // 该会话已按「整会话单条」入过集（roundIndex 为空的旧行为），保持跳过
       skipped.push(sessionId);
       continue;
     }
-    if (sessionId) existingSessionIds.add(sessionId);
+    if (sessionId) existingKeys.add(`${sessionId}#`);
     toCreate.push(item);
   }
 
@@ -56,18 +58,41 @@ export async function POST(
   const created = await prisma.$transaction(async (tx) => {
     const addedCaseIds: string[] = [];
     for (const item of toCreate) {
-      const { input, actualOutput } = await extractSessionData(item.sessionId || "");
-      const created = await tx.experimentCase.create({
+      const sessionId = item.sessionId || "";
+      const rounds = sessionId ? await extractSessionRounds(sessionId) : [];
+      if (rounds.length > 0) {
+        for (const r of rounds) {
+          const key = `${sessionId}#${r.roundIndex}`;
+          if (existingKeys.has(key)) continue;
+          existingKeys.add(key);
+          const row = await tx.experimentCase.create({
+            data: {
+              experimentId: id,
+              sessionId: sessionId || null,
+              roundIndex: r.roundIndex,
+              input: r.input,
+              actualOutput: r.actualOutput,
+              referenceOutput: item.referenceOutput || null,
+            },
+            select: { id: true },
+          });
+          addedCaseIds.push(row.id);
+        }
+        continue;
+      }
+      const { input, actualOutput } = await extractSessionData(sessionId);
+      const row = await tx.experimentCase.create({
         data: {
           experimentId: id,
-          sessionId: item.sessionId || null,
+          sessionId: sessionId || null,
+          roundIndex: null,
           input,
           actualOutput,
           referenceOutput: item.referenceOutput || null,
         },
         select: { id: true },
       });
-      addedCaseIds.push(created.id);
+      addedCaseIds.push(row.id);
     }
     return addedCaseIds;
   });

@@ -200,9 +200,10 @@ export function useOutcomePalette(): Record<OutcomeKey, string> {
   return isDark ? DARK_OUTCOME : LIGHT_OUTCOME;
 }
 
-/** 把后端 outcome 字符串收敛成四个绘图键 */
+/** 把后端 outcome 字符串收敛成四个绘图键（truncated 暂并入 failed，与 successRateOf 口径一致） */
 export function normalizeOutcome(outcome: string, status?: string): OutcomeKey {
   if (outcome === "success" || outcome === "partial" || outcome === "failed") return outcome;
+  if (outcome === "truncated") return "failed";
   if (status === "active") return "unknown";
   return "unknown";
 }

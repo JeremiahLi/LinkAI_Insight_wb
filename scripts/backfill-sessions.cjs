@@ -9,7 +9,11 @@
  * 本脚本按与 src/lib/engine/ingest/derive.ts 完全一致的规则重算（改规则时两处要同步）：
  *   - Agent 名：从 tool_call input 的 .pi/skills 锚点与 cd 命令反推工作目录 basename；
  *   - 标题：首条 user span 的 input 截断 60 字；
- *   - 终态：末条 answer 成功且有输出 → success（无 failed） / partial（有 failed），否则 failed。
+ *   - 终态（2026-11-04 修订，与 derive.computeOutcome 同步）：
+ *     末条 answer 成功且有输出 → success（失败全部自愈）/ partial（存在未自愈失败）；
+ *     末条 answer 空 + 此前有交付 + 无新追问 → truncated（假失败）；
+ *     否则 failed。自愈判定复用 detect 层编译产物（.tmp-verify），
+ *     缺失时退回旧口径并告警 —— 先跑 npm run detect:build 再跑本脚本。
  *
  * 父子链（Session.parentSessionId，2026-10 起）不做回填：历史采集记录与库内均无
  * 链接信息，时间窗 + cwd 启发式误判率不可接受（宁缺毋假），历史行保持 null。
@@ -25,6 +29,17 @@ const prisma = new PrismaClient();
 const APPLY = process.argv.includes("--apply");
 const FALLBACK_AGENT_NAME = "pi-coding-agent";
 const TITLE_MAX = 60;
+
+// 自愈判定依赖 detect 层编译产物（npm run detect:build 产出 .tmp-verify/detect/*.js）。
+// 与 derive.ts 共用同一份实现，避免第三份重复逻辑漂移。
+let extractFailureChains = null;
+let signatureOf = null;
+try {
+  ({ extractFailureChains } = require("../.tmp-verify/detect/failure-chain.js"));
+  ({ signatureOf } = require("../.tmp-verify/detect/error-signature.js"));
+} catch (e) {
+  console.warn("[warn] 未找到 .tmp-verify/detect 编译产物，自愈判定退化：先执行 npm run detect:build");
+}
 
 /* ------------------------------ 与 derive.ts 同规则 ------------------------------ */
 
@@ -113,16 +128,63 @@ function deriveTitle(spans) {
   return t ? t.slice(0, TITLE_MAX) : "";
 }
 
+/** 与 derive.computeOutcome 同规则（2026-11-04 口径）：自愈不算 partial，假失败记 truncated */
 function computeOutcome(spans) {
   if (spans.length === 0) return "";
-  const answers = spans
-    .filter((s) => s.kind === "answer")
-    .sort((a, b) => (a.roundIndex || 0) - (b.roundIndex || 0) || (a.turnId || 0) - (b.turnId || 0));
+  const ordered = [...spans].sort(
+    (a, b) => (a.roundIndex || 0) - (b.roundIndex || 0) || (a.turnId || 0) - (b.turnId || 0),
+  );
+  const answers = ordered.filter((s) => s.kind === "answer");
   if (answers.length === 0) return "failed";
   const last = answers[answers.length - 1];
   const delivered = last.status !== "failed" && normalizeText(last.output).length > 0;
-  if (!delivered) return "failed";
-  return spans.some((s) => s.status === "failed") ? "partial" : "success";
+
+  if (!delivered) {
+    // 假失败：末条 answer 空 + 此前有非空交付 + 交付后无新 user 追问
+    let lastDeliveredIdx = -1;
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      const s = ordered[i];
+      if (s.kind === "answer" && s.status !== "failed" && normalizeText(s.output).length > 0) {
+        lastDeliveredIdx = i;
+        break;
+      }
+    }
+    if (lastDeliveredIdx >= 0) {
+      const hasNewAsk = ordered.slice(lastDeliveredIdx + 1).some((s) => s.kind === "user");
+      if (!hasNewAsk) return "truncated";
+    }
+    return "failed";
+  }
+
+  // 自愈判定：与 derive.ts 完全同源（复用 detect 编译产物）
+  const canDetect = !!(extractFailureChains && signatureOf);
+  const chainSpans = ordered.map((s, i) => ({
+    id: s.id || `#${i}`,
+    roundIndex: s.roundIndex || 0,
+    kind: s.kind || "",
+    name: s.name || "",
+    status: s.status || "",
+    error: s.error || null,
+    output: s.output || null,
+  }));
+  const recoveredIds = canDetect
+    ? new Set(
+        extractFailureChains(chainSpans)
+          .filter((c) => c.outcome === "retried_recovered")
+          .flatMap((c) => c.spanIds),
+      )
+    : new Set();
+
+  const unrecovered = chainSpans.some((s) => {
+    if (s.status !== "failed") return false;
+    if (s.kind === "answer" || s.kind === "llm_thinking") return true;
+    if (s.kind !== "tool_call" && s.kind !== "command") return false;
+    if (!canDetect) return true; // 退化：无检测器时一律算未自愈（保守，等于旧口径）
+    if (recoveredIds.has(s.id)) return false;
+    const sig = signatureOf({ error: s.error, name: s.name, status: s.status });
+    return sig.kind !== "not_an_error";
+  });
+  return unrecovered ? "partial" : "success";
 }
 
 /* --------------------------------- 主流程 --------------------------------- */
@@ -143,7 +205,7 @@ function computeOutcome(spans) {
   });
 
   const spans = await prisma.span.findMany({
-    select: { sessionId: true, kind: true, status: true, roundIndex: true, turnId: true, input: true, output: true },
+    select: { sessionId: true, id: true, kind: true, name: true, status: true, roundIndex: true, turnId: true, input: true, output: true, error: true },
   });
   const spansBySession = new Map();
   for (const sp of spans) {
@@ -179,7 +241,6 @@ function computeOutcome(spans) {
     const nextOutcome = computeOutcome(list);
     const nextStatus =
       nextOutcome === "failed" ? "error" : nextOutcome === "" ? s.status : "completed";
-
     const nextProjectName =
       s.project && s.project.name === s.projectId && wsName ? wsName : s.project ? s.project.name : s.projectId;
 
@@ -218,7 +279,7 @@ function computeOutcome(spans) {
   console.log(`\n[A] Agent 归属变更（${agentSplits.size} 组）`);
   for (const [k, n] of [...agentSplits].sort((a, b) => b[1] - a[1])) console.log(`  ${k}  ${n} 个会话`);
 
-  const outcomeShift = { success: 0, partial: 0, failed: 0, "": 0 };
+  const outcomeShift = { success: 0, partial: 0, failed: 0, truncated: 0, "": 0 };
   let outcomeChanged = 0;
   for (const op of ops) {
     if (op.nextOutcome !== op.prevOutcome) {
@@ -227,7 +288,7 @@ function computeOutcome(spans) {
     }
   }
   console.log(`\n[B] 终态重算：${outcomeChanged} 个会话发生变化`);
-  console.log(`  变更后分布：success ${outcomeShift.success} / partial ${outcomeShift.partial} / failed ${outcomeShift.failed} / 空 ${outcomeShift[""]}`);
+  console.log(`  变更后分布：success ${outcomeShift.success} / partial ${outcomeShift.partial} / failed ${outcomeShift.failed} / truncated ${outcomeShift.truncated} / 空 ${outcomeShift[""]}`);
 
   const titleAdded = ops.filter((o) => !o.prevTitle && o.nextTitle).length;
   console.log(`\n[C] 标题：补出 ${titleAdded} 个会话标题`);

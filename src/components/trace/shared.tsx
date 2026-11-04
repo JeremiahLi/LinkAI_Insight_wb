@@ -35,7 +35,7 @@ export function StatusBadge({ status }: { status: "active" | "completed" | "erro
  * outcome 为空串表示历史数据未回填，退回按 status 展示。
  */
 export function OutcomeBadge({ outcome, status }: { outcome: string; status: string }) {
-  const kind: "running" | "success" | "partial" | "failed" | "unknown" =
+  const kind: "running" | "success" | "partial" | "failed" | "truncated" | "unknown" =
     status === "active"
       ? "running"
       : outcome === "success"
@@ -44,13 +44,16 @@ export function OutcomeBadge({ outcome, status }: { outcome: string; status: str
           ? "partial"
           : outcome === "failed"
             ? "failed"
-            : "unknown";
+            : outcome === "truncated"
+              ? "truncated"
+              : "unknown";
 
   const label = {
     running: "进行中",
     success: "成功",
     partial: "部分成功",
     failed: "失败",
+    truncated: "疑似截断",
     unknown: "完成",
   }[kind];
 
@@ -58,10 +61,12 @@ export function OutcomeBadge({ outcome, status }: { outcome: string; status: str
     <span
       title={
         kind === "partial"
-          ? "最终交付了产物，但过程中出现过失败（工具重试 / 质检回流）"
+          ? "最终交付了产物，但过程中存在未自愈的失败（工具失败重试无效 / 质检回流）"
           : kind === "failed"
             ? "末轮回答失败或没有产出内容"
-            : undefined
+            : kind === "truncated"
+              ? "末轮无输出但此前有交付且无新追问，疑似采集端截断（成功率中暂按失败计）"
+              : undefined
       }
       className={cn(
         "inline-flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-[11px] font-medium",
@@ -69,6 +74,7 @@ export function OutcomeBadge({ outcome, status }: { outcome: string; status: str
         kind === "success" && "bg-success/10 text-success",
         kind === "partial" && "bg-warning/10 text-warning",
         kind === "failed" && "bg-destructive/10 text-destructive",
+        kind === "truncated" && "bg-warning/10 text-warning",
         kind === "unknown" && "bg-muted text-muted-foreground",
       )}
     >

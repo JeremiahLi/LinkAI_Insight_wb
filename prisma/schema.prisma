@@ -30,6 +30,7 @@ model Agent {
 
   projects  Project[]
   sessions  Session[]
+  issues    Issue[]
 }
 
 model Project {
@@ -213,6 +214,8 @@ model ExperimentCase {
   experimentId         String
   experiment           Experiment @relation(fields: [experimentId], references: [id], onDelete: Cascade)
   sessionId            String?
+  /// 来源轮次（多轮会话按轮拆 case，2026-11-04）；单轮/整会话抽取为 null
+  roundIndex           Int?
   input                String   @default("")
   actualOutput         String   @default("")
   referenceOutput      String?
@@ -275,3 +278,37 @@ model UserSettings {
 }
 
 
+
+/// 问题单：把散落在内存里的 issue 变成可追踪、可验证、可复发的实体（PLAN M1.4）。
+/// 指纹 = 检测类型 + 归一化特征（如 tool_failure:<family>:<tool>），
+/// 同一问题跨会话累加 occurrences，跨版本识别复发。
+model Issue {
+  id             String   @id @default(cuid())
+  agentId        String
+  agent          Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// 检测类型（如 tool_failure_chain）；对应 detect 层检测器
+  type           String
+  severity       String   @default("warning")
+  /// type + 归一化特征，跨会话跨版本识别同一问题
+  fingerprint    String
+  title          String
+  evidenceJson   String   @default("[]")
+  /// 代表样例
+  sessionId      String?
+  spanId         String?
+  firstSeenAt    DateTime @default(now())
+  lastSeenAt     DateTime @default(now())
+  occurrences    Int      @default(1)
+  /// open | ack | fixed | wontfix | stale（不做中间态；fixed 时必须填 fixedInVersion）
+  status         String   @default("open")
+  /// 关闭该问题的版本；用于验证「新版本是否修好」
+  fixedInVersion String   @default("")
+  /// 由本问题派生的回归用例，JSON 数组存 caseId（M2 接入）
+  caseIdsJson    String   @default("[]")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([agentId, fingerprint])
+  @@index([agentId, status, severity])
+  @@index([lastSeenAt])
+}

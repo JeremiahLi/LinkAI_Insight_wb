@@ -108,6 +108,50 @@ function readAgentMeta() {
   }
 }
 
+/**
+ * 读取当前工作目录的 git commit sha（纯文件读取，不 spawn git）。
+ * 覆盖三种形态：普通分支（HEAD → refs/heads/xx）、detached HEAD（HEAD 直接是 sha）、
+ * packed-refs（松散 ref 文件不存在时查 packed-refs）。拿不到如实返回 ''，不造假值。
+ */
+function gitShaOf(cwd) {
+  try {
+    var gitDir = path.join(cwd, '.git')
+    if (!fs.existsSync(gitDir)) return ''
+    // .git 可能是文件（worktree/submodule：gitdir: <path>）
+    if (fs.statSync(gitDir).isFile()) {
+      var m = /^gitdir:\s*(.+)\r?\n?$/.exec(fs.readFileSync(gitDir, 'utf-8'))
+      if (!m) return ''
+      gitDir = path.isAbsolute(m[1].trim()) ? m[1].trim() : path.resolve(cwd, m[1].trim())
+      if (!fs.existsSync(gitDir)) return ''
+    }
+    var head = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf-8').trim()
+    var refM = /^ref:\s*(.+)$/.exec(head)
+    if (!refM) return /^[0-9a-f]{40}$/.test(head) ? head : ''
+    var refPath = path.join(gitDir, refM[1].replace(/\//g, path.sep === '\\' ? '\\' : '/'))
+    if (fs.existsSync(refPath)) {
+      var sha = fs.readFileSync(refPath, 'utf-8').trim()
+      return /^[0-9a-f]{40}$/.test(sha) ? sha : ''
+    }
+    // 松散 ref 不存在 → 查 packed-refs
+    var packedPath = path.join(gitDir, 'packed-refs')
+    if (fs.existsSync(packedPath)) {
+      var lines = fs.readFileSync(packedPath, 'utf-8').split('\n')
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim()
+        if (!line || line.charAt(0) === '#' || line.charAt(0) === '^') continue
+        var spIdx = line.indexOf(' ')
+        if (spIdx > 0 && line.slice(spIdx + 1).trim() === refM[1].trim()) {
+          var psha = line.slice(0, spIdx).trim()
+          return /^[0-9a-f]{40}$/.test(psha) ? psha : ''
+        }
+      }
+    }
+    return ''
+  } catch (e) {
+    return ''
+  }
+}
+
 function safeStringify(value) {
   var seen = []
   try {
@@ -219,6 +263,10 @@ var currentProjectId = null
 var currentRoundIndex = null
 var currentTurnId = null
 var currentSessionStartTime = null
+// 当前会话的系统提示词指纹（before_agent_start 时计算）。
+// 写到每条记录顶层 promptHash，upload.cjs 会提升为 payload 顶层 → 服务端 Session.promptHash。
+// session_start 事件先于 before_agent_start 触发，所以 session_start 自身带不上，属预期。
+var currentPromptHash = null
 var lastProviderRequestTime = null
 var lastAssistantMessageStartTime = null
 var pendingToolExecutionStart = null
@@ -277,6 +325,7 @@ function ensureWriter(sessionId, projectId) {
   currentProjectId = projectId
   currentRoundIndex = null
   currentTurnId = null
+  currentPromptHash = null
   // 换会话即 adopt 父链（幂等；覆盖扩展加载晚于 session_start 的时序；
   // session_start 已 adopt 过同一会话时直接用缓存，不会误读被重写的 env）
   adoptParentChain(sessionId)
@@ -441,6 +490,7 @@ function writeEvent(event, ctx, kindOverride, nameOverride, statusOverride, payl
       payload: safePayload
     }
     if (currentParentSessionId) record.parentSessionId = currentParentSessionId
+    if (currentPromptHash) record.promptHash = currentPromptHash
     currentWriter.enqueue(record)
   } catch (err) {
     appendLogLine(PLUGIN_LOG_PATH, 'writeEvent.error kind=' + kind + ' ' + (err && err.message || err))
@@ -454,7 +504,7 @@ export default function piCaptureExtension(pi) {
     var ownSid = (ctx && ctx.sessionManager && ctx.sessionManager.getSessionId && ctx.sessionManager.getSessionId()) || null
     var parentSessionId = adoptParentChain(ownSid)
     var agentMeta = readAgentMeta()
-    var extra = { pid: process.pid, parentSessionId: parentSessionId }
+    var extra = { pid: process.pid, parentSessionId: parentSessionId, agent_git_sha: gitShaOf(ctx && ctx.cwd || process.cwd()) }
     if (agentMeta) {
       extra.agent_name = agentMeta.agent_name
       extra.agent_id = agentMeta.agent_id
@@ -483,6 +533,11 @@ export default function piCaptureExtension(pi) {
   })
 
   pi.on('before_agent_start', function(event, ctx) {
+    // 系统提示词指纹：每轮请求都会触发，内容没变则哈希不变。
+    // 写到记录顶层 promptHash（writeEvent），upload.cjs 提升为 payload 顶层，
+    // 服务端落 Session.promptHash —— 用于识别「版本号没动但 prompt 改了」。
+    var systemPromptText = (event && event.systemPrompt) || ''
+    currentPromptHash = systemPromptText ? sha1Hex(systemPromptText) : null
     // 尝试采集工具定义清单（每次请求都会携带，但 usage 不含其构成）：
     // 记录 name + 序列化后字符数，供前端把「工具定义」从其他输入中拆出。defensive：pi API 不存在时跳过。
     var toolsInfo = null

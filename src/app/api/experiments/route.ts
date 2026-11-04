@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { extractSessionData } from "@/lib/engine/experiment/session-data";
+import { extractSessionData, extractSessionRounds } from "@/lib/engine/experiment/session-data";
 
 
 export async function GET() {
@@ -56,15 +56,32 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "At least one case is required" }, { status: 400 });
   }
 
+  // 按轮拆 case（2026-11-04 口径）：每个会话拆成 N 个「轮次问答对」，
+  // input = 该轮用户诉求，actualOutput = 该轮末条非空 answer。
+  // 无有效轮的会话退回单条抽取（沿用旧行为，可能产出空 actualOutput 的 case）。
   const casesWithData = await Promise.all(
-    caseItems.map(async (item: { sessionId?: string; referenceOutput?: string | null }) => {
-      const { input, actualOutput } = await extractSessionData(item.sessionId || "");
-      return {
-        sessionId: item.sessionId || null,
-        input,
-        actualOutput,
-        referenceOutput: item.referenceOutput || null,
-      };
+    caseItems.flatMap(async (item: { sessionId?: string; referenceOutput?: string | null }) => {
+      const sessionId = item.sessionId || "";
+      const rounds = sessionId ? await extractSessionRounds(sessionId) : [];
+      if (rounds.length > 0) {
+        return rounds.map((r) => ({
+          sessionId: sessionId || null,
+          roundIndex: r.roundIndex,
+          input: r.input,
+          actualOutput: r.actualOutput,
+          referenceOutput: item.referenceOutput || null,
+        }));
+      }
+      const { input, actualOutput } = await extractSessionData(sessionId);
+      return [
+        {
+          sessionId: sessionId || null,
+          roundIndex: null as number | null,
+          input,
+          actualOutput,
+          referenceOutput: item.referenceOutput || null,
+        },
+      ];
     })
   );
 
