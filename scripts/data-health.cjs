@@ -137,6 +137,20 @@ function pct(num, den) {
     }
   }
 
+  // ---- F. 闭环验收（PLAN M2）：fixed 的问题单应至少关联 1 个回归用例 ----
+  const issues = await prisma.issue.findMany({
+    select: { id: true, status: true, title: true, caseIdsJson: true },
+  });
+  const fixedIssues = issues.filter((i) => i.status === "fixed");
+  const fixedNoCase = fixedIssues.filter((i) => {
+    try {
+      const arr = JSON.parse(i.caseIdsJson || "[]");
+      return !Array.isArray(arr) || arr.length === 0;
+    } catch {
+      return true;
+    }
+  });
+
   const report = {
     generatedAt: new Date().toISOString(),
     A_answerEmptyRate: {
@@ -170,6 +184,12 @@ function pct(num, den) {
       validRate: pct(roundPairsValid, roundPairs),
       acceptance: "≥95%",
     },
+    F_closedLoop: {
+      fixedIssues: fixedIssues.length,
+      fixedWithoutCase: fixedNoCase.length,
+      samples: fixedNoCase.slice(0, 5).map((i) => ({ id: i.id, title: i.title.slice(0, 60) })),
+      acceptance: "fixed 问题单应至少关联 1 个回归用例",
+    },
   };
 
   if (AS_JSON) {
@@ -184,6 +204,8 @@ function pct(num, den) {
     console.log(`    新口径成功率：${successRate}（finished ${finished} / bad ${bad} / partial ${partial}）`);
     console.log(`[D] 版本覆盖：agentVersion ${report.D_versionCoverage.agentVersion} · promptHash ${report.D_versionCoverage.promptHash} · session_start span ${sessionStartSpans}`);
     console.log(`[E] 按轮抽取非空率：${report.E_roundExtraction.validRate}（${roundPairsValid}/${roundPairs}，多轮会话 ${multiRoundSessions}，验收 ≥95%）`);
+    console.log(`[F] 闭环验收：fixed ${fixedIssues.length} 个，其中缺回归用例 ${fixedNoCase.length} 个（验收 0）`);
+    fixedNoCase.slice(0, 5).forEach((i) => console.log(`    缺用例 ${i.id} ${i.title.slice(0, 50)}`));
   }
 })()
   .catch((e) => {

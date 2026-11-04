@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Check, RotateCcw, Wrench, X } from "lucide-react";
+import { Check, FlaskConical, RotateCcw, Wrench, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { StatsRange } from "@/lib/engine/stats/range";
 
@@ -28,6 +28,7 @@ interface IssueItem {
   occurrences: number;
   status: string;
   fixedInVersion: string;
+  caseIds: string[];
 }
 
 const SEVERITY_META: Record<string, { label: string; badge: string }> = {
@@ -56,6 +57,10 @@ export function IssueTrackerPanel({ agentName, range }: { agentName: string; ran
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [versionInput, setVersionInput] = useState<{ id: string; value: string } | null>(null);
+  // 「生成回归用例」内联流程（M2.2）：选目标实验 → POST /api/issues/[id]/cases
+  const [caseIssueId, setCaseIssueId] = useState<string | null>(null);
+  const [experiments, setExperiments] = useState<{ id: string; name: string; caseCount: number }[]>([]);
+  const [selectedExperiment, setSelectedExperiment] = useState<string>("");
 
   const load = useCallback(() => {
     setLoading(true);
@@ -119,6 +124,40 @@ export function IssueTrackerPanel({ agentName, range }: { agentName: string; ran
       load();
     } catch (e: unknown) {
       setMessage(`操作失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openCaseFlow(issueId: string) {
+    setCaseIssueId(issueId);
+    setSelectedExperiment("");
+    setExperiments([]);
+    fetch("/api/experiments")
+      .then((r) => r.json() as Promise<{ id: string; name: string; caseCount: number }[]>)
+      .then((list) => setExperiments(list))
+      .catch(() => setExperiments([]));
+  }
+
+  async function createCase(issueId: string) {
+    if (!selectedExperiment) return;
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/issues/${issueId}/cases`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ experimentId: selectedExperiment }),
+      });
+      const body = (await r.json()) as { error?: string; message?: string; snapshotSpans?: number };
+      if (!r.ok) throw new Error(body.error ?? `HTTP ${r.status}`);
+      setMessage(
+        body.message ??
+          `回归用例已生成（固化轨迹快照 ${body.snapshotSpans ?? 0} 条 span），可在实验页复跑`,
+      );
+      setCaseIssueId(null);
+      load();
+    } catch (e: unknown) {
+      setMessage(`生成失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -198,8 +237,8 @@ export function IssueTrackerPanel({ agentName, range }: { agentName: string; ran
                   </p>
                 )}
 
-                {(issue.status === "open" || issue.status === "ack") && (
-                  <div className="mt-1.5 flex items-center gap-2">
+                {(issue.status === "open" || issue.status === "ack" || issue.status === "fixed") && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
                     {versionInput?.id === issue.id ? (
                       <>
                         <input
@@ -237,24 +276,80 @@ export function IssueTrackerPanel({ agentName, range }: { agentName: string; ran
                             <Check className="size-3" /> 确认
                           </button>
                         )}
+                        {issue.status !== "fixed" && (
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => setVersionInput({ id: issue.id, value: "" })}
+                            className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                          >
+                            <Wrench className="size-3" /> 标记已修
+                          </button>
+                        )}
                         <button
                           type="button"
                           disabled={busy}
-                          onClick={() => setVersionInput({ id: issue.id, value: "" })}
+                          onClick={() => openCaseFlow(issue.id)}
                           className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50"
                         >
-                          <Wrench className="size-3" /> 标记已修
+                          <FlaskConical className="size-3" /> 生成回归用例
                         </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => patch(issue.id, "wontfix")}
-                          className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50"
-                        >
-                          <X className="size-3" /> 不修
-                        </button>
+                        {issue.caseIds?.length > 0 && (
+                          <span className="text-[11px] text-muted-foreground/70">
+                            已关联 {issue.caseIds.length} 个用例
+                          </span>
+                        )}
+                        {issue.status === "open" && (
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => patch(issue.id, "wontfix")}
+                            className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                          >
+                            <X className="size-3" /> 不修
+                          </button>
+                        )}
                       </>
                     )}
+                  </div>
+                )}
+
+                {caseIssueId === issue.id && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-sm border border-border/60 bg-muted/30 px-2 py-1.5">
+                    <span className="text-[11px] text-muted-foreground">入集到：</span>
+                    {experiments.length === 0 ? (
+                      <span className="text-[11px] text-muted-foreground">
+                        没有可用实验——先在「实验中心」新建一个
+                      </span>
+                    ) : (
+                      <select
+                        value={selectedExperiment}
+                        onChange={(e) => setSelectedExperiment(e.target.value)}
+                        className="h-6 max-w-56 rounded-sm border border-border bg-transparent px-1 text-xs"
+                      >
+                        <option value="">选择实验…</option>
+                        {experiments.map((exp) => (
+                          <option key={exp.id} value={exp.id}>
+                            {exp.name}（{exp.caseCount} 用例）
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <button
+                      type="button"
+                      disabled={busy || !selectedExperiment}
+                      onClick={() => createCase(issue.id)}
+                      className="inline-flex items-center gap-1 rounded-sm bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success disabled:opacity-50"
+                    >
+                      <FlaskConical className="size-3" /> 生成
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCaseIssueId(null)}
+                      className="inline-flex items-center gap-1 rounded-sm px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground"
+                    >
+                      <X className="size-3" /> 取消
+                    </button>
                   </div>
                 )}
               </li>
