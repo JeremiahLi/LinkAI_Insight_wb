@@ -10,7 +10,7 @@
 > 3. PLAN.md 记录「做了什么」，本文记录「系统现在长什么样」——后者以本文为准。
 >
 > 最后签收：____（待你审阅后填写日期）
-> 生成：2026-11-04，逐条基于当日代码实读，非凭记忆。
+> 生成：2026-11-04，逐条基于当日代码实读（截至提交 46e3330），非凭记忆。
 
 ---
 
@@ -40,7 +40,7 @@
 │ prisma/schema.prisma（唯一事实源，276 行）                        │
 │ Session / Span / Agent / Project / User / Skill /               │
 │ BusinessMetric / Experiment / ExperimentCase / EvalResult /     │
-│ UserSettings                                                    │
+│ Issue / UserSettings                                            │
 └──┬───────────────────┬───────────────────┬────────────────────┘
    ↓                   ↓                   ↓
 ┌─ 统计层 stats/* ─┐ ┌─ 检测层 detect/* ─┐ ┌─ 实验层 experiment/* ─┐
@@ -67,6 +67,7 @@
 | `Span` | 会话内一次调用 | `kind` 分 user / llm_thinking / tool_call / answer / system_prompt；**`startTime` 是 Int Unix 秒**（与 Session 的 DateTime 不同） |
 | `Agent/Project/User` | 归属三维 | Agent 实例名 = 工作目录名（derive 反推）；Project.name 是可读目录名（曾错存为 hex id） |
 | `Experiment*` 四张表 | 评测中心 | case 可来自会话抽取或手工；EvalResult 按 (caseId, evaluatorId) 唯一 |
+| `Issue`（2026-11-04 新增） | 问题单：检测器产出的 Finding 落库为可追踪实体 | 按 (agentId, fingerprint) 去重；status 生命周期 open/ack/fixed/wontfix/stale；置 fixed 需关联版本 |
 | `Skill / BusinessMetric / UserSettings` | 辅助 | Skill 有 contentHash 做同步去重 |
 
 ### 2.2 入口层（API 路由，按职责分组）
@@ -75,7 +76,8 @@
 |---|---|---|
 | 上传 | `POST /api/sessions/upload` | 唯一数据入口；数值字段 toIntOr 收敛、非法回退 0；agentName/projectName/agentVersion 顶层字段支持 |
 | 会话 | `/api/sessions`（列表/board/top/by-tag）、`[sessionId]`、`tree` | 列表与 trace 树 |
-| Agent | `/api/agents`、`[name]`、`issues`、`recurrence` | 看板、详情、**运行异常分析**、症状复发 |
+| Agent | `/api/agents`、`[name]`、`issues`、`recurrence` | 看板、详情、**运行异常分析**（即时计算）、症状复发 |
+| 问题单 | `/api/issues`（recompute / 列表）、`/api/issues/[id]` PATCH | M1.4：按 Agent+时间窗重跑检测器 upsert Issue；PATCH 改状态 |
 | 统计看板 | `/api/dashboard/overview`、`agents/*`、`users/*`、`/api/stats`、`/api/llm/board` | 各看板页的数据源 |
 | 技能 | `/api/skills`（sync/stats/board/[name]/usage） | Skill 同步与使用统计 |
 | 评测 | `/api/experiments`（CRUD/cases/run/results/compare/sessions）、`/api/evaluators` | 实验全生命周期；evaluator 元数据透出 |
@@ -113,7 +115,7 @@
 | `command-stats.ts`（413 行） | 接口级成败对照（「bash 26% 失败」拆到「python merge.py 53%，入参与成功样本一致→问题在数据」）。**铁律：禁止 normalizeToolName 合并接口**（edit/write/edit_file 入参结构不同，混桶产生假结论） |
 | `recurrence.ts`（203 行） | 症状复发统计。触发率分母 = 该工具该周调用次数（不是会话数）；「本周期没出现」≠「修好了」 |
 | `diagnoser.ts`（336 行） | L3：规则判不了的交 LLM；含 8K 证据裁剪、降级重试 |
-| `agent-failures.ts`（287 行） | IO 聚合层：接库、跑检测器、产出 DTO（唯一依赖 prisma 的检测层文件） |
+| `agent-failures.ts`（287 行） | IO 聚合层：接库、跑检测器、产出 DTO（检测层中唯一直接接库的文件；Issue 落库走 lib/engine/issues/recompute.ts） |
 
 ### 2.6 诊断层（src/lib/engine/diagnose/，五层管线）
 
@@ -142,7 +144,14 @@ hallucination（收紧为「断言在材料中找不到」）等。
 | `session-data.ts` | 用例抽取：**末条非空 answer**、多轮按轮拆 case（M0.1，2026-11-04 修正） |
 | `run-experiment.ts` / `detail-agg.ts` | 实验执行与结果聚合 |
 
-### 2.8 前端页面（src/app/(main)/）
+### 2.8 问题单层（src/lib/engine/issues/，2026-11-04 新增）
+
+| 文件 | 职责 |
+|---|---|
+| `recompute.ts`（173 行） | 检测器 → Issue 落库：按 Agent+时间窗跑检测、按 (agentId, fingerprint) upsert、累加 occurrences、更新 lastSeenAt |
+| `components/agent/issue-tracker-panel.tsx` | 问题单面板：状态流转（标记已修/忽略）、复发可见 |
+
+### 2.9 前端页面（src/app/(main)/）
 
 | 页面 | 数据源 | 你常用程度（预判，待你修正） |
 |---|---|---|
@@ -209,7 +218,11 @@ schema.prisma ──► upload route ──► derive.ts ──► 库
 |---|---|---|
 | M0.1 用例抽取口径（末条非空 answer、按轮拆 case） | experiment/session-data.ts | 2026-11-04 |
 | M0.2 版本快照落列（update 不覆盖） | upload route | 2026-11-03 |
+| M0.4 数据体检脚本（answer 空值率 / outcome 分布基线） | scripts/data-health.cjs | 2026-11-04（提交 46e3330） |
 | M0.5 truncated 假失败终态 | derive.ts + session-outcome.ts | 2026-11-04 |
+| M1.4 Issue 实体化：Issue 表 + recompute/列表/PATCH 接口 + 问题单面板 | schema + lib/engine/issues + api/issues | 2026-11-04（提交 46e3330） |
+| 采集端上报 agent_git_sha / promptHash | pi_extension_capture.ts | 2026-11-04（提交 46e3330） |
+| 会话回填已 apply：成功率 76.3% → 82.4% | backfill-sessions.cjs | 2026-11-04 |
 | B1/B2 检测器链：签名/失败链/建议 + CLI | detect/* + analyze-agent.cjs | 2026-11-02 |
 | B3.5 接口级成败对照 | command-stats.ts | 2026-11-02 |
 | 诊断五层 L0-L5 + 根因 11 类重构 | diagnose/* | 2026-11-03 |
@@ -223,16 +236,14 @@ schema.prisma ──► upload route ──► derive.ts ──► 库
 
 | 项 | 现状 | 缺口 |
 |---|---|---|
-| M0.3 采集端版本契约 | 服务端支持顶层 agentVersion/promptHash | 采集端 `.pi/agent.json` 需逐 Agent 写 version；**历史数据不可回填**，全库覆盖率≈0 |
+| M0.3 采集端版本契约 | 服务端支持顶层 agentVersion/promptHash；采集端已上报 agent_git_sha/promptHash（46e3330） | `.pi/agent.json` 需逐 Agent 写 `version` 字段；**历史数据不可回填**，覆盖率需用体检脚本跟踪 |
 | 误报治理（M1.3 allowlist） | 只有 not_an_error 剔除 + garbled 标志 | 无配置化预期失败白名单（grep 非零、测试失败等） |
-| Issue 实体（M1.4） | 本库 issues 是**即时计算**，不落库 | 无 Issue model → 无「标记已修/fixedInVersion」生命周期 |
 
 ### ❌ 未做（按 PLAN 优先级）
 
 | 项 | 说明 | 前置 |
 |---|---|---|
-| M0.4 数据体检脚本 data-health.cjs | answer 空值率/outcome 分布基线报告 | 无，半天可做 |
-| M2 回归集自生长 | Finding→Case、srcIssueId、轨迹快照固化 | Issue 实体 |
+| M2 回归集自生长 | Finding→Case（cases route 已有部分改造，46e3330 动过）、srcIssueId、轨迹快照固化 | Issue 实体（✅ 已就位，M2 可启动） |
 | M3 版本验证与门禁 | Release 表、版本切片、门禁判定 | agentVersion 覆盖率（当前≈0，**空转风险高**） |
 | M4 告警与用户信号 | SessionFeedback、发布劣化检测、推送 | 无强依赖 |
 | **测试（PLAN 之外，本档案新增）** | 全库**零自动化测试**；仅 detect:build 编译验证 | 无 |
@@ -246,7 +257,7 @@ schema.prisma ──► upload route ──► derive.ts ──► 库
 3. **L2 规则准确率在同批数据上验证**（规则是对着那 19 条标注写的），真实准确率必须用新采集会话复验。
 4. **judge 一致率未达标**（严格 31.6%）：版本对比目前只认规则层结论，LLM judge 输出只作分诊。
 5. **数据先天缺陷**：25.8% 错误文本编码损坏（可分类不可读）；exit_code 类 63 条无法归因；26.3% answer 为空（M0.1 已修抽取端，源头仍缺）。
-6. **双分叉**：本仓库（端口 3010）是权威主线；`AgentOps-Cursor`（端口 3002，独立 dev.db/git）有 Release+Issue 持久化雏形但**问题状态机停滞在 candidate**。合并其能力时不可照抄状态查询（`status in (open,confirmed,fixed)` 查不出东西）。
+6. **双分叉**：本仓库（端口 3010）是权威主线；`AgentOps-Cursor`（端口 3002，独立 dev.db/git）也有 Release+Issue 持久化雏形但**问题状态机停滞在 candidate**（查询 `status in (open,confirmed,fixed)` 而库里全是 candidate，状态从未推进）。合并其能力时不可照抄状态查询；本库 Issue 状态流转要避免重蹈：每次 recompute 只更新事实字段，**状态只由用户动作改**。
 7. **疑似过剩**：user-stats/skill-stats/skills/llm 四组看板面向多用户多 Agent 运营，个人自用价值存疑——是否砍掉由你定（砍是控制权的行使）。
 
 ---
@@ -259,6 +270,7 @@ npm run detect:build           # 编译检测/诊断模块到 .tmp-verify（类�
 npm run detect:analyze -- <agentName|all> <days>   # 异常排行 + 接口级成败对照
 npm run detect:diagnose        # LLM 根因跑批（key 在 .env，缓存于 diagnosis-cache.json）
 node scripts/backfill-sessions.cjs [--apply]       # 会话回填（先 dry-run）
+node scripts/data-health.cjs                        # 数据体检基线（schema 变更后复跑）
 NODE_OPTIONS= ./node_modules/.bin/prisma db push --skip-generate   # schema 变更后
 ```
 
