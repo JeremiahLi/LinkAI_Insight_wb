@@ -102,12 +102,30 @@ model Session {
   user             User     @relation(fields: [userId], references: [id])
   agent            Agent    @relation(fields: [agentId], references: [id])
   spans            Span[]
+  feedbacks        SessionFeedback[]
 
   @@index([userId, status, startTime])
   @@index([agentId, startTime])
   @@index([projectId, startTime])
   @@index([startTime])
   @@index([parentSessionId])
+}
+
+/// 用户侧信号：唯一不依赖 judge 的 ground truth（PLAN M4.3）。
+/// kind：thumbs_up | thumbs_down | reask | abandon | adopt；
+/// by=auto 表示机器推断（放弃检测），人工输入为用户标识。
+model SessionFeedback {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  kind      String
+  /// 自由备注（人为输入可空）
+  note      String   @default("")
+  by        String   @default("")
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+  @@index([kind, createdAt])
 }
 
 model Skill {

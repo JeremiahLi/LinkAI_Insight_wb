@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { TraceTimeline } from "./trace-timeline";
 import { TraceTranscript } from "./trace-transcript";
 import { OutcomeBadge } from "./shared";
+import { FeedbackButtons } from "./feedback-buttons";
 import { SlidePanel } from "./slide-panel";
 import { SessionTreePanel } from "./session-tree-panel";
 import {
@@ -389,6 +390,7 @@ export function SessionDetailView({ sessionId, onBack }: Props) {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <FeedbackButtons sessionId={sessionId} />
           <StatusBadge status={detail.status} />
           <div className="mr-1 flex items-center gap-1 rounded-lg bg-muted/50 p-1">
             <Button
